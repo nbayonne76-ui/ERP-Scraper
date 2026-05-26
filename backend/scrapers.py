@@ -478,6 +478,9 @@ async def run_all_scrapers() -> tuple[list[dict], list[str]]:
         "Sell2Wales": scrape_sell2wales(),
         "WhatDoTheyKnow": scrape_whatdotheyknow(),
         "Companies House": scrape_companies_house(),
+        "Tavily Search": scrape_tavily(),
+        "Brave Search": scrape_brave_search(),
+        "Firecrawl": scrape_firecrawl(),
     }
 
     all_signals = []
@@ -505,3 +508,237 @@ async def run_all_scrapers() -> tuple[list[dict], list[str]]:
 
     logger.info(f"[scrapers] total: {len(all_signals)} raw → {len(deduped)} after dedup")
     return deduped, sources_ok
+
+
+# ── 9. Tavily — AI-native web search ─────────────────────────────────────────
+
+TAVILY_QUERIES = [
+    "ERP tender procurement UK 2026",
+    "ERP system selection UK council NHS hospital",
+    "enterprise resource planning RFP ITT UK public sector",
+    "digital transformation finance system UK government",
+    "SAP OR Oracle OR Dynamics365 OR Unit4 procurement UK tender",
+]
+
+
+async def scrape_tavily() -> list[dict]:
+    """
+    Tavily Search API — purpose-built for AI agents.
+    Returns rich, citation-ready snippets with real-time web results.
+    Requires TAVILY_API_KEY (free tier: 1000 searches/month).
+    """
+    api_key = os.getenv("TAVILY_API_KEY", "")
+    if not api_key:
+        logger.info("[tavily] no TAVILY_API_KEY — skipped")
+        return []
+
+    results = []
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        for query in TAVILY_QUERIES:
+            try:
+                resp = await client.post(
+                    "https://api.tavily.com/search",
+                    json={
+                        "api_key": api_key,
+                        "query": query,
+                        "search_depth": "advanced",
+                        "include_raw_content": False,
+                        "max_results": 8,
+                        "include_domains": [],
+                        "exclude_domains": [],
+                    },
+                    headers={"Content-Type": "application/json"},
+                )
+                if resp.status_code != 200:
+                    logger.warning(f"[tavily] HTTP {resp.status_code} for query: {query[:40]}")
+                    continue
+
+                data = resp.json()
+                for item in data.get("results", []):
+                    title = item.get("title", "")
+                    content = item.get("content", "")[:500]
+                    combined = title + " " + content
+                    if _erp_score(combined) == 0:
+                        continue
+                    results.append({
+                        "source": "Tavily Search",
+                        "title": title,
+                        "org": "",
+                        "url": item.get("url", ""),
+                        "summary": content,
+                        "sector": "Unknown",
+                        "keywords": _extract_keywords(combined),
+                        "published": item.get("published_date", ""),
+                        "detected_at": NOW(),
+                    })
+            except Exception as e:
+                logger.warning(f"[tavily] {type(e).__name__}: {e}")
+
+    logger.info(f"[tavily] {len(results)} ERP signals")
+    return results
+
+
+# ── 10. Brave Search — independent search index ───────────────────────────────
+
+BRAVE_QUERIES = [
+    "ERP tender UK 2026 site:find-tender.service.gov.uk OR site:contractsfinder.service.gov.uk",
+    "enterprise resource planning procurement UK council 2026",
+    "ERP implementation project manager UK public sector hiring",
+    "finance system replacement UK NHS OR council OR government 2026",
+]
+
+
+async def scrape_brave_search() -> list[dict]:
+    """
+    Brave Search API — fastest latency, independent index (no Google).
+    Requires BRAVE_API_KEY (free tier available at api.search.brave.com).
+    """
+    api_key = os.getenv("BRAVE_API_KEY", "")
+    if not api_key:
+        logger.info("[brave] no BRAVE_API_KEY — skipped")
+        return []
+
+    results = []
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        for query in BRAVE_QUERIES:
+            try:
+                resp = await client.get(
+                    "https://api.search.brave.com/res/v1/web/search",
+                    params={"q": query, "count": 10, "freshness": "pm", "text_decorations": False},
+                    headers={
+                        "X-Subscription-Token": api_key,
+                        "Accept": "application/json",
+                        "Accept-Encoding": "gzip",
+                    },
+                )
+                if resp.status_code != 200:
+                    logger.warning(f"[brave] HTTP {resp.status_code} for query: {query[:40]}")
+                    continue
+
+                data = resp.json()
+                for item in data.get("web", {}).get("results", []):
+                    title = item.get("title", "")
+                    description = item.get("description", "")[:500]
+                    combined = title + " " + description
+                    if _erp_score(combined) == 0:
+                        continue
+                    results.append({
+                        "source": "Brave Search",
+                        "title": title,
+                        "org": "",
+                        "url": item.get("url", ""),
+                        "summary": description,
+                        "sector": "Unknown",
+                        "keywords": _extract_keywords(combined),
+                        "published": item.get("age", ""),
+                        "detected_at": NOW(),
+                    })
+            except Exception as e:
+                logger.warning(f"[brave] {type(e).__name__}: {e}")
+
+    logger.info(f"[brave] {len(results)} ERP signals")
+    return results
+
+
+# ── 11. Firecrawl — JS-rendered portal scraping ───────────────────────────────
+
+FIRECRAWL_SEARCH_QUERIES = [
+    "ERP enterprise resource planning tender UK 2026",
+    "finance system procurement UK public sector 2026",
+    "ERP selection ITT RFP UK council NHS",
+]
+
+FIRECRAWL_SCRAPE_URLS = [
+    "https://bidstats.uk/tenders?q=ERP+enterprise+resource+planning&status=live",
+    "https://www.digitalmarketplace.service.gov.uk/buyers/direct-award/cloud/search?q=erp",
+]
+
+
+async def scrape_firecrawl() -> list[dict]:
+    """
+    Firecrawl — turns JS-heavy portals into clean LLM-ready markdown.
+    Handles Cloudflare, pagination, and structured extraction.
+    Requires FIRECRAWL_API_KEY (free tier: 10 scrapes/min at firecrawl.dev).
+    """
+    api_key = os.getenv("FIRECRAWL_API_KEY", "")
+    if not api_key:
+        logger.info("[firecrawl] no FIRECRAWL_API_KEY — skipped")
+        return []
+
+    results = []
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        # AI-powered search — finds and extracts ERP-relevant pages
+        for query in FIRECRAWL_SEARCH_QUERIES:
+            try:
+                resp = await client.post(
+                    "https://api.firecrawl.dev/v1/search",
+                    headers=headers,
+                    json={"query": query, "limit": 8, "scrapeOptions": {"formats": ["markdown"]}},
+                )
+                if resp.status_code != 200:
+                    logger.warning(f"[firecrawl] search HTTP {resp.status_code}: {query[:40]}")
+                    continue
+
+                data = resp.json()
+                for item in (data.get("data") or []):
+                    title = item.get("title", "") or item.get("metadata", {}).get("title", "")
+                    content = (item.get("markdown") or item.get("description", ""))[:500]
+                    combined = title + " " + content
+                    if _erp_score(combined) == 0:
+                        continue
+                    results.append({
+                        "source": "Firecrawl Search",
+                        "title": title,
+                        "org": "",
+                        "url": item.get("url", ""),
+                        "summary": content,
+                        "sector": "Unknown",
+                        "keywords": _extract_keywords(combined),
+                        "published": item.get("metadata", {}).get("publishedDate", ""),
+                        "detected_at": NOW(),
+                    })
+            except Exception as e:
+                logger.warning(f"[firecrawl:search] {type(e).__name__}: {e}")
+
+        # Direct scrape of JS-heavy procurement portals
+        for url in FIRECRAWL_SCRAPE_URLS:
+            try:
+                resp = await client.post(
+                    "https://api.firecrawl.dev/v1/scrape",
+                    headers=headers,
+                    json={"url": url, "formats": ["markdown"], "onlyMainContent": True},
+                )
+                if resp.status_code != 200:
+                    logger.warning(f"[firecrawl] scrape HTTP {resp.status_code}: {url}")
+                    continue
+
+                data = resp.json()
+                content = (data.get("data", {}).get("markdown") or "")[:3000]
+                title = data.get("data", {}).get("metadata", {}).get("title", url)
+
+                # Split into blocks and filter for ERP-relevant lines
+                blocks = [b.strip() for b in content.split("\n\n") if b.strip()]
+                for block in blocks:
+                    if _erp_score(block) == 0:
+                        continue
+                    results.append({
+                        "source": "Firecrawl Scrape",
+                        "title": block[:120],
+                        "org": "",
+                        "url": url,
+                        "summary": block[:500],
+                        "sector": "Public",
+                        "keywords": _extract_keywords(block),
+                        "published": "",
+                        "detected_at": NOW(),
+                    })
+            except Exception as e:
+                logger.warning(f"[firecrawl:scrape] {type(e).__name__}: {e}")
+
+    logger.info(f"[firecrawl] {len(results)} ERP signals")
+    return results

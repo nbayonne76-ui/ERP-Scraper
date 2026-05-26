@@ -1,26 +1,24 @@
 """
-AI signal scorer using GPT-4o-mini via AsyncOpenAI.
-Scores each signal 1-10 for ERP procurement relevance.
-Falls back to keyword-based scoring if no API key.
+AI signal scorer using Claude Haiku (Anthropic).
+Falls back to keyword-based scoring if no ANTHROPIC_API_KEY is set.
 """
 import os
 import json
 import logging
-from openai import AsyncOpenAI
+import anthropic
 
 logger = logging.getLogger(__name__)
 
-# Singleton client — created once, reused for all calls
-_client: AsyncOpenAI | None = None
+_client: anthropic.AsyncAnthropic | None = None
 
 
-def _get_client() -> AsyncOpenAI | None:
+def _get_client() -> anthropic.AsyncAnthropic | None:
     global _client
-    api_key = os.getenv("OPENAI_API_KEY", "")
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
     if not api_key:
         return None
     if _client is None:
-        _client = AsyncOpenAI(api_key=api_key)
+        _client = anthropic.AsyncAnthropic(api_key=api_key)
     return _client
 
 
@@ -46,11 +44,11 @@ Score guide:
 - 3-4: Indirect signal (IT outsourcing, vague digital transformation)
 - 1-2: Unrelated or very generic
 
-Context: UK procurement stages are: Prior Information Notice → Market Engagement → ITT/RFP → Award."""
+Context: UK procurement stages are: Prior Information Notice -> Market Engagement -> ITT/RFP -> Award."""
 
 
 def _keyword_score(signal: dict) -> dict:
-    """Fallback scorer when no OpenAI API key is set."""
+    """Fallback scorer when no ANTHROPIC_API_KEY is set."""
     text = f"{signal.get('title', '')} {signal.get('summary', '')}".lower()
     score = 2
     reason_parts = []
@@ -104,7 +102,7 @@ async def score_signal(signal: dict) -> dict:
 
     if not client:
         result = _keyword_score(signal)
-        logger.debug(f"[scorer] keyword fallback → {result['score']}/10: {signal.get('title','')[:50]}")
+        logger.debug(f"[scorer] keyword fallback -> {result['score']}/10: {signal.get('title','')[:50]}")
     else:
         try:
             prompt = f"""Title: {signal.get('title', '')}
@@ -113,25 +111,21 @@ Source: {signal.get('source', '')}
 Summary: {signal.get('summary', '')[:600]}
 URL: {signal.get('url', '')}"""
 
-            response = await client.chat.completions.create(
-                model="gpt-4o-mini",
+            message = await client.messages.create(
+                model="claude-haiku-4-5-20251001",
                 max_tokens=300,
-                temperature=0,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
+                system=SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
             )
-            raw = response.choices[0].message.content.strip()
-            # Strip markdown fences if model adds them despite instruction
+            raw = message.content[0].text.strip()
             if raw.startswith("```"):
                 raw = raw.split("```")[1]
                 if raw.startswith("json"):
                     raw = raw[4:]
             result = json.loads(raw)
-            logger.debug(f"[scorer] AI {result.get('score')}/10: {signal.get('title','')[:50]}")
+            logger.debug(f"[scorer] Claude Haiku {result.get('score')}/10: {signal.get('title','')[:50]}")
         except Exception as e:
-            logger.warning(f"[scorer] AI failed ({type(e).__name__}), keyword fallback")
+            logger.warning(f"[scorer] Claude Haiku failed ({type(e).__name__}), keyword fallback")
             result = _keyword_score(signal)
 
     return {
@@ -145,7 +139,7 @@ URL: {signal.get('url', '')}"""
 
 
 async def score_signals(signals: list[dict]) -> list[dict]:
-    """Score a batch of signals concurrently (10 at a time to respect rate limits)."""
+    """Score a batch of signals concurrently (10 at a time)."""
     import asyncio
     batch_size = 10
     scored = []
@@ -160,6 +154,6 @@ async def score_signals(signals: list[dict]) -> list[dict]:
             else:
                 scored.append(result)
         if i + batch_size < len(signals):
-            await asyncio.sleep(0.5)  # light rate limiting between batches
+            await asyncio.sleep(0.3)
 
     return scored
