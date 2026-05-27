@@ -27,6 +27,7 @@ async def init_db():
                 url         TEXT,
                 summary     TEXT,
                 sector      TEXT,
+                erp_stage   TEXT    DEFAULT 'unknown',
                 score       INTEGER DEFAULT 0,
                 score_reason TEXT,
                 keywords    TEXT,
@@ -46,12 +47,16 @@ async def init_db():
             )
         """)
 
-        # Migration: add dedup_hash column to existing DBs that don't have it
-        try:
-            await db.execute("ALTER TABLE signals ADD COLUMN dedup_hash TEXT NOT NULL DEFAULT ''")
-            logger.info("[db] migrated: added dedup_hash column")
-        except Exception:
-            pass  # column already exists
+        # Migrations for existing DBs
+        for col, definition in [
+            ("dedup_hash", "TEXT NOT NULL DEFAULT ''"),
+            ("erp_stage",  "TEXT DEFAULT 'unknown'"),
+        ]:
+            try:
+                await db.execute(f"ALTER TABLE signals ADD COLUMN {col} {definition}")
+                logger.info(f"[db] migrated: added {col} column")
+            except Exception:
+                pass  # column already exists
 
         # Backfill dedup_hash for rows that have empty hash (old data or just migrated)
         cursor = await db.execute("SELECT id, url, title FROM signals WHERE dedup_hash = '' OR dedup_hash IS NULL")
@@ -87,9 +92,9 @@ async def insert_signal(signal: dict) -> int | None:
         try:
             cursor = await db.execute("""
                 INSERT INTO signals
-                (dedup_hash, source, title, org, url, summary, sector, score,
+                (dedup_hash, source, title, org, url, summary, sector, erp_stage, score,
                  score_reason, keywords, published, detected_at, converted)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
             """, (
                 dedup,
                 signal.get("source"),
@@ -98,6 +103,7 @@ async def insert_signal(signal: dict) -> int | None:
                 signal.get("url"),
                 signal.get("summary"),
                 signal.get("sector"),
+                signal.get("erp_stage", "unknown"),
                 signal.get("score", 0),
                 signal.get("score_reason"),
                 json.dumps(signal.get("keywords", [])),
@@ -107,11 +113,11 @@ async def insert_signal(signal: dict) -> int | None:
             await db.commit()
             return cursor.lastrowid
         except aiosqlite.IntegrityError:
-            # Duplicate — update score if new score is higher
+            # Duplicate — update score and erp_stage if new score is higher
             await db.execute("""
-                UPDATE signals SET score = MAX(score, ?), score_reason = ?
+                UPDATE signals SET score = MAX(score, ?), score_reason = ?, erp_stage = ?
                 WHERE dedup_hash = ? AND score < ?
-            """, (signal.get("score", 0), signal.get("score_reason"), dedup, signal.get("score", 0)))
+            """, (signal.get("score", 0), signal.get("score_reason"), signal.get("erp_stage", "unknown"), dedup, signal.get("score", 0)))
             await db.commit()
             return None
 

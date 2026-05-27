@@ -2,6 +2,7 @@
 Background scheduler — runs scans every N hours via APScheduler.
 """
 import asyncio
+import logging
 from datetime import datetime, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -10,6 +11,7 @@ from scrapers import run_all_scrapers
 from scorer import score_signals
 from db import insert_signal, insert_scan_run, finish_scan_run
 
+logger = logging.getLogger(__name__)
 scheduler = AsyncIOScheduler()
 _last_scan_status: dict = {"running": False, "last_run": None, "signals_found": 0, "error": None}
 
@@ -18,7 +20,7 @@ async def run_scan():
     global _last_scan_status
 
     if _last_scan_status["running"]:
-        print("[scheduler] scan already running, skipping")
+        logger.info("[scheduler] scan already running, skipping")
         return
 
     _last_scan_status["running"] = True
@@ -26,12 +28,12 @@ async def run_scan():
     run_id = await insert_scan_run(started_at)
 
     try:
-        print(f"[scheduler] Starting scan at {started_at}")
+        logger.info(f"[scheduler] Starting scan at {started_at}")
         signals, sources = await run_all_scrapers()
-        print(f"[scheduler] Scraped {len(signals)} raw signals from {sources}")
+        logger.info(f"[scheduler] Scraped {len(signals)} raw signals from {len(sources)} sources")
 
         scored = await score_signals(signals)
-        print(f"[scheduler] Scored {len(scored)} signals")
+        logger.info(f"[scheduler] Scored {len(scored)} signals")
 
         saved = 0
         for s in scored:
@@ -48,7 +50,7 @@ async def run_scan():
             "signals_found": saved,
             "error": None,
         })
-        print(f"[scheduler] Done. Saved {saved} signals (score >= 4)")
+        logger.info(f"[scheduler] Done. Saved {saved} signals (score >= 4)")
 
     except Exception as e:
         error_msg = str(e)
@@ -60,7 +62,7 @@ async def run_scan():
             "signals_found": 0,
             "error": error_msg,
         })
-        print(f"[scheduler] Scan failed: {e}")
+        logger.error(f"[scheduler] Scan failed: {e}")
 
 
 def get_scan_status() -> dict:
@@ -76,4 +78,4 @@ def start_scheduler(interval_hours: int = 6):
         replace_existing=True,
     )
     scheduler.start()
-    print(f"[scheduler] Started — scanning every {interval_hours}h")
+    logger.info(f"[scheduler] Started — scanning every {interval_hours}h")

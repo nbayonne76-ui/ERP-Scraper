@@ -2,6 +2,9 @@
 Web scrapers for UK ERP tender signals.
 All sources are free / official APIs — no auth required except Companies House.
 """
+import re
+import asyncio
+import urllib.parse
 import httpx
 import feedparser
 import os
@@ -130,8 +133,6 @@ async def scrape_find_a_tender() -> list[dict]:
                 if not next_url or not releases:
                     break
 
-                # Extract cursor from next URL
-                import re
                 m = re.search(r"cursor=([^&]+)", next_url)
                 cursor = m.group(1) if m else None
                 if not cursor:
@@ -178,7 +179,6 @@ async def scrape_contracts_finder() -> list[dict]:
                 if not next_url or not releases:
                     break
 
-                import re
                 m = re.search(r"cursor=([^&]+)", next_url)
                 cursor = m.group(1) if m else None
                 if not cursor:
@@ -210,16 +210,13 @@ async def scrape_google_news() -> list[dict]:
     async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
         for feed_name, query in GOOGLE_NEWS_QUERIES:
             try:
-                import urllib.parse
                 url = base.format(query=urllib.parse.quote(query))
                 resp = await client.get(url, headers={"User-Agent": UA})
                 feed = feedparser.parse(resp.text)
 
                 for entry in feed.entries[:15]:
                     title = entry.get("title", "")
-                    # Google News wraps summaries in HTML — strip tags
                     raw_summary = entry.get("summary", "")
-                    import re
                     summary = re.sub(r"<[^>]+>", " ", raw_summary).strip()[:500]
                     url_e = entry.get("link", "")
                     published = entry.get("published", "")
@@ -269,13 +266,7 @@ async def scrape_pcs() -> list[dict]:
                     if signal:
                         results.append(signal)
             else:
-                # Fallback: search RSS via keyword URL
-                resp2 = await client.get(
-                    "https://www.publiccontractsscotland.gov.uk/search/search_mainpage.aspx",
-                    params={"searchType": "2", "keyword": "ERP enterprise resource planning"},
-                    headers={"User-Agent": UA}
-                )
-                logger.debug(f"[pcs] fallback status: {resp2.status_code}")
+                logger.debug(f"[pcs] OCDS endpoint returned {resp.status_code}")
     except Exception as e:
         logger.warning(f"[pcs] {type(e).__name__}: {e}")
 
@@ -467,8 +458,6 @@ async def scrape_whatdotheyknow() -> list[dict]:
 
 async def run_all_scrapers() -> tuple[list[dict], list[str]]:
     """Run all scrapers concurrently. Returns (signals, sources_with_results)."""
-    import asyncio
-
     scrapers = {
         "Find a Tender": scrape_find_a_tender(),
         "Contracts Finder": scrape_contracts_finder(),

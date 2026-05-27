@@ -642,6 +642,15 @@ const SCORE_COLOR = (score) => {
   return { color: "#64748b", bg: "rgba(100,116,139,0.1)", label: "📭 Weak" };
 };
 
+const ERP_STAGE_LABEL = {
+  "awareness":     { label: "Awareness",      color: "#64748b", bg: "rgba(100,116,139,0.1)" },
+  "pre-market":    { label: "Pre-Market",      color: "#a855f7", bg: "rgba(168,85,247,0.12)" },
+  "selection":     { label: "Selection",       color: "#f59e0b", bg: "rgba(245,158,11,0.12)" },
+  "active-tender": { label: "🎯 Active Tender", color: "#dc2626", bg: "rgba(220,38,38,0.12)" },
+  "implementation":{ label: "Implementation",  color: "#16a34a", bg: "rgba(22,163,74,0.12)"  },
+  "unknown":       { label: null,              color: null,      bg: null                    },
+};
+
 function BackendStatusWidget({ status, onTriggerScan, loading }) {
   const isRunning = status?.scan?.running;
   const lastRun = status?.scan?.last_run;
@@ -686,6 +695,7 @@ function BackendStatusWidget({ status, onTriggerScan, loading }) {
 function SignalCard({ signal, onConvert }) {
   const sc = SCORE_COLOR(signal.score);
   const secColor = SECTOR_COLORS[signal.sector] || "#6366f1";
+  const stage = ERP_STAGE_LABEL[signal.erp_stage] || ERP_STAGE_LABEL["unknown"];
   const [expanded, setExpanded] = useState(false);
 
   return (
@@ -693,11 +703,13 @@ function SignalCard({ signal, onConvert }) {
       <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginBottom: 6, alignItems: "center" }}>
-            {/* Score badge */}
             <span style={{ background: sc.bg, color: sc.color, borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>
               {sc.label} {signal.score}/10
             </span>
             <span style={{ background: `${secColor}22`, color: secColor, borderRadius: 20, padding: "2px 9px", fontSize: 11, fontWeight: 600 }}>{signal.sector}</span>
+            {stage.label && (
+              <span style={{ background: stage.bg, color: stage.color, borderRadius: 20, padding: "2px 9px", fontSize: 10, fontWeight: 600 }}>{stage.label}</span>
+            )}
             <span style={{ background: "rgba(99,102,241,0.1)", color: "#a5b4fc", borderRadius: 20, padding: "2px 9px", fontSize: 10 }}>{signal.source}</span>
             {signal.converted === 1 && <span style={{ background: "#dcfce7", color: "#166534", borderRadius: 20, padding: "2px 9px", fontSize: 10, fontWeight: 700 }}>✓ Converted</span>}
             <span style={{ color: "#334155", fontSize: 10, marginLeft: "auto" }}>{signal.published || signal.detected_at?.slice(0, 10)}</span>
@@ -880,7 +892,7 @@ function TabSignals({ onConvertSignal }) {
       )}
 
       <div style={{ marginTop: 16, padding: "10px 14px", background: "rgba(99,102,241,0.06)", border: "1px solid rgba(99,102,241,0.2)", borderRadius: 8, fontSize: 11, color: "#6366f1" }}>
-        🤖 <strong>AI-powered signals</strong> scraped from Contracts Finder, Find a Tender, BidStats, Google News & more. Scored by Claude Haiku for ERP relevance. Auto-scans every {status?.interval_hours || 6}h. Click <strong>+ Add to Tracker</strong> to convert any signal into a tracked tender.
+        🤖 <strong>AI-powered signals</strong> scraped from Contracts Finder, Find a Tender, BidStats, Google News & more. Scored by GPT-4o-mini for ERP relevance. Auto-scans every {status?.interval_hours || 6}h. Click <strong>+ Add to Tracker</strong> to convert any signal into a tracked tender.
       </div>
     </div>
   );

@@ -121,10 +121,11 @@ URL: {signal.get('url', '')}"""
                 ],
             )
             raw = response.choices[0].message.content.strip()
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
+            # Strip markdown code fences if present
+            import re as _re
+            json_match = _re.search(r'\{.*\}', raw, _re.DOTALL)
+            if json_match:
+                raw = json_match.group()
             result = json.loads(raw)
             logger.debug(f"[scorer] GPT-4o-mini {result.get('score')}/10: {signal.get('title','')[:50]}")
         except Exception as e:
