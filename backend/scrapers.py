@@ -481,6 +481,7 @@ async def run_all_scrapers() -> tuple[list[dict], list[str]]:
         "Tavily Search": scrape_tavily(),
         "Brave Search": scrape_brave_search(),
         "Firecrawl": scrape_firecrawl(),
+        "Crawl4AI": scrape_crawl4ai(),
     }
 
     all_signals = []
@@ -741,4 +742,94 @@ async def scrape_firecrawl() -> list[dict]:
                 logger.warning(f"[firecrawl:scrape] {type(e).__name__}: {e}")
 
     logger.info(f"[firecrawl] {len(results)} ERP signals")
+    return results
+
+
+# ── 12. Crawl4AI — JS portals, free, self-hosted ──────────────────────────────
+
+CRAWL4AI_TARGETS = [
+    {
+        "name": "BidStats.uk",
+        "url": "https://bidstats.uk/tenders?q=ERP+enterprise+resource+planning&status=live",
+        "sector": "Public",
+    },
+    {
+        "name": "Digital Marketplace G-Cloud",
+        "url": "https://www.digitalmarketplace.service.gov.uk/g-cloud/search?q=erp+enterprise+resource+planning",
+        "sector": "Public",
+    },
+    {
+        "name": "TED Europa UK ERP",
+        "url": "https://ted.europa.eu/en/search/result?scope=NOTICE&fullText=ERP+enterprise+resource+planning+United+Kingdom&sortField=ND&sortOrder=LATEST",
+        "sector": "Public",
+    },
+]
+
+
+async def scrape_crawl4ai() -> list[dict]:
+    """
+    Crawl4AI — 100% free, self-hosted, no API key.
+    Handles JS rendering, anti-bot (3-tier), Shadow DOM.
+    Targets JS-heavy portals that raw httpx cannot scrape.
+    Gracefully skips if crawl4ai is not installed.
+    """
+    try:
+        from crawl4ai import AsyncWebCrawler, CacheMode
+    except ImportError:
+        logger.warning("[crawl4ai] not installed — run: pip install crawl4ai && python3 -m playwright install chromium")
+        return []
+
+    results = []
+
+    try:
+        async with AsyncWebCrawler(headless=True, verbose=False) as crawler:
+            for target in CRAWL4AI_TARGETS:
+                try:
+                    result = await crawler.arun(
+                        url=target["url"],
+                        cache_mode=CacheMode.BYPASS,
+                        word_count_threshold=8,
+                        excluded_tags=["nav", "footer", "header", "script", "style"],
+                        remove_overlay_elements=True,
+                        wait_until="networkidle",
+                    )
+
+                    if not result.success:
+                        logger.warning(f"[crawl4ai] {target['name']}: {result.error_message}")
+                        continue
+
+                    markdown = result.markdown or ""
+                    # Split into blocks and filter ERP-relevant ones
+                    blocks = [b.strip() for b in markdown.split("\n\n") if len(b.strip()) > 40]
+
+                    seen_block_keys = set()
+                    for block in blocks:
+                        if _erp_score(block) == 0:
+                            continue
+                        # Dedup similar blocks
+                        block_key = block[:60]
+                        if block_key in seen_block_keys:
+                            continue
+                        seen_block_keys.add(block_key)
+
+                        title = block[:120].replace("\n", " ").strip()
+                        results.append({
+                            "source": f"Crawl4AI — {target['name']}",
+                            "title": title,
+                            "org": "",
+                            "url": target["url"],
+                            "summary": block[:500],
+                            "sector": target["sector"],
+                            "keywords": _extract_keywords(block),
+                            "published": "",
+                            "detected_at": NOW(),
+                        })
+
+                except Exception as e:
+                    logger.warning(f"[crawl4ai:{target['name']}] {type(e).__name__}: {e}")
+
+    except Exception as e:
+        logger.warning(f"[crawl4ai] browser init failed: {type(e).__name__}: {e}")
+
+    logger.info(f"[crawl4ai] {len(results)} ERP signals")
     return results
