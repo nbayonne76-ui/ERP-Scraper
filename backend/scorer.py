@@ -1,24 +1,24 @@
 """
-AI signal scorer using Claude Haiku (Anthropic).
-Falls back to keyword-based scoring if no ANTHROPIC_API_KEY is set.
+AI signal scorer using GPT-4o-mini (OpenAI).
+Falls back to keyword-based scoring if no OPENAI_API_KEY is set.
 """
 import os
 import json
 import logging
-import anthropic
+from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 
-_client: anthropic.AsyncAnthropic | None = None
+_client: AsyncOpenAI | None = None
 
 
-def _get_client() -> anthropic.AsyncAnthropic | None:
+def _get_client() -> AsyncOpenAI | None:
     global _client
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    api_key = os.getenv("OPENAI_API_KEY", "")
     if not api_key:
         return None
     if _client is None:
-        _client = anthropic.AsyncAnthropic(api_key=api_key)
+        _client = AsyncOpenAI(api_key=api_key)
     return _client
 
 
@@ -48,7 +48,7 @@ Context: UK procurement stages are: Prior Information Notice -> Market Engagemen
 
 
 def _keyword_score(signal: dict) -> dict:
-    """Fallback scorer when no ANTHROPIC_API_KEY is set."""
+    """Fallback scorer when no OPENAI_API_KEY is set."""
     text = f"{signal.get('title', '')} {signal.get('summary', '')}".lower()
     score = 2
     reason_parts = []
@@ -111,21 +111,24 @@ Source: {signal.get('source', '')}
 Summary: {signal.get('summary', '')[:600]}
 URL: {signal.get('url', '')}"""
 
-            message = await client.messages.create(
-                model="claude-haiku-4-5-20251001",
+            response = await client.chat.completions.create(
+                model="gpt-4o-mini",
                 max_tokens=300,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
             )
-            raw = message.content[0].text.strip()
+            raw = response.choices[0].message.content.strip()
             if raw.startswith("```"):
                 raw = raw.split("```")[1]
                 if raw.startswith("json"):
                     raw = raw[4:]
             result = json.loads(raw)
-            logger.debug(f"[scorer] Claude Haiku {result.get('score')}/10: {signal.get('title','')[:50]}")
+            logger.debug(f"[scorer] GPT-4o-mini {result.get('score')}/10: {signal.get('title','')[:50]}")
         except Exception as e:
-            logger.warning(f"[scorer] Claude Haiku failed ({type(e).__name__}), keyword fallback")
+            logger.warning(f"[scorer] GPT-4o-mini failed ({type(e).__name__}), keyword fallback")
             result = _keyword_score(signal)
 
     return {
@@ -154,6 +157,6 @@ async def score_signals(signals: list[dict]) -> list[dict]:
             else:
                 scored.append(result)
         if i + batch_size < len(signals):
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.5)
 
     return scored
