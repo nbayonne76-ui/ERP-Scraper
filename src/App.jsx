@@ -298,20 +298,66 @@ function TenderDetailModal({ tender, tracking, onUpdateTracking, onEdit, onDelet
 
 // ─── Tab: Tenders ─────────────────────────────────────────────────────────────
 
-function TabTenders({ tenders, tracking, onOpen, onAdd, onExport }) {
+function TabTenders({ tenders, tracking, onOpen, onAdd, onExport, onTrackSignal }) {
   const [filterStatus, setFilterStatus] = useState("All");
   const [filterSector, setFilterSector] = useState("All");
   const [filterStage, setFilterStage] = useState("All");
   const [searchText, setSearchText] = useState("");
   const [showBookmarked, setShowBookmarked] = useState(false);
+  const [aiSignals, setAiSignals] = useState([]);
+  const [showAI, setShowAI] = useState(true);
 
-  const sectors = ["All", ...new Set(tenders.map((t) => t.sector))];
+  useEffect(() => {
+    const fetchAI = async () => {
+      try {
+        const resp = await fetch(`${API_BASE}/api/signals?min_score=7&converted=0&limit=100`);
+        if (resp.ok) {
+          const data = await resp.json();
+          setAiSignals(data.signals || []);
+        }
+      } catch {}
+    };
+    fetchAI();
+    const iv = setInterval(fetchAI, 60000);
+    return () => clearInterval(iv);
+  }, []);
 
-  const filtered = tenders.filter((t) => {
-    const tr = tracking[t.id] || {};
+  // Build AI items, deduplicated against already-tracked tender URLs
+  const trackedUrls = new Set(tenders.map((t) => t.url).filter(Boolean));
+  const aiItems = aiSignals
+    .filter((s) => s.url && !trackedUrls.has(s.url))
+    .map((s) => ({
+      id: `ai_${s.id}`,
+      _type: "ai",
+      _signalId: s.id,
+      org: s.org || s.source || "Unknown",
+      title: s.title,
+      sector: s.sector || "Unknown",
+      status: s.erp_stage === "active-tender" ? "Active" : s.erp_stage === "pre-market" ? "Pre-Market" : "Active",
+      value: "TBC",
+      published: s.published || s.detected_at?.slice(0, 10) || "",
+      url: s.url,
+      score: s.score,
+      scoreReason: s.score_reason,
+      erp_stage: s.erp_stage,
+      source: s.source,
+    }));
+
+  const allItems = [
+    ...tenders.map((t) => ({ ...t, _type: "manual" })),
+    ...(showAI ? aiItems : []),
+  ];
+
+  const sectors = ["All", ...new Set(allItems.map((t) => t.sector).filter(Boolean))];
+
+  const filtered = allItems.filter((t) => {
+    const tr = t._type === "manual" ? (tracking[t.id] || {}) : {};
     if (filterStatus !== "All" && t.status !== filterStatus) return false;
     if (filterSector !== "All" && t.sector !== filterSector) return false;
-    if (filterStage !== "All" && (tr.stage || "watching") !== filterStage) return false;
+    if (filterStage !== "All") {
+      if (t._type === "ai") return false;
+      if ((tr.stage || "watching") !== filterStage) return false;
+    }
     if (showBookmarked && !tr.bookmarked) return false;
     if (searchText) {
       const q = searchText.toLowerCase();
@@ -320,8 +366,27 @@ function TabTenders({ tenders, tracking, onOpen, onAdd, onExport }) {
     return true;
   });
 
+  const manualCount = filtered.filter((t) => t._type === "manual").length;
+  const aiCount = filtered.filter((t) => t._type === "ai").length;
+
   return (
     <div>
+      {/* AI Banner */}
+      {aiItems.length > 0 && (
+        <div style={{ background: "rgba(99,102,241,0.08)", border: "1px solid rgba(99,102,241,0.3)", borderRadius: 9, padding: "10px 16px", marginBottom: 14, display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={{ fontSize: 16 }}>🤖</span>
+          <span style={{ flex: 1, fontSize: 12, color: "#a5b4fc" }}>
+            <strong style={{ color: "#c7d2fe" }}>{aiItems.length} new tender{aiItems.length > 1 ? "s" : ""} detected</strong> by AI (score ≥ 7/10, not yet tracked). Click <strong>Track →</strong> to add to your pipeline.
+          </span>
+          <button
+            onClick={() => setShowAI(!showAI)}
+            style={{ background: showAI ? "rgba(99,102,241,0.2)" : "transparent", border: "1px solid #4338ca", color: "#a5b4fc", padding: "5px 12px", borderRadius: 6, cursor: "pointer", fontSize: 11, fontWeight: 600 }}
+          >
+            {showAI ? "Hide" : "Show"}
+          </button>
+        </div>
+      )}
+
       {/* Toolbar */}
       <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
         <input
@@ -336,7 +401,7 @@ function TabTenders({ tenders, tracking, onOpen, onAdd, onExport }) {
       </div>
 
       {/* Filters */}
-      <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
         {["All", ...STATUSES].map((s) => (
           <button key={s} onClick={() => setFilterStatus(s)} style={{ padding: "5px 10px", borderRadius: 6, border: "1px solid", borderColor: filterStatus === s ? "#6366f1" : "#334155", background: filterStatus === s ? "rgba(99,102,241,0.15)" : "transparent", color: filterStatus === s ? "#a5b4fc" : "#64748b", cursor: "pointer", fontSize: 11, fontWeight: 500 }}>{s}</button>
         ))}
@@ -352,9 +417,56 @@ function TabTenders({ tenders, tracking, onOpen, onAdd, onExport }) {
         ))}
       </div>
 
+      {/* Count summary */}
+      {(manualCount > 0 || aiCount > 0) && (
+        <div style={{ display: "flex", gap: 10, marginBottom: 10, fontSize: 11, color: "#475569" }}>
+          {manualCount > 0 && <span>{manualCount} tracked tender{manualCount > 1 ? "s" : ""}</span>}
+          {aiCount > 0 && <span style={{ color: "#818cf8" }}>+ {aiCount} AI-detected</span>}
+        </div>
+      )}
+
       {/* List */}
       <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
         {filtered.map((t) => {
+          // ── AI-detected tender card ──
+          if (t._type === "ai") {
+            const sc = SCORE_COLOR(t.score);
+            const stage = ERP_STAGE_LABEL[t.erp_stage] || ERP_STAGE_LABEL["unknown"];
+            return (
+              <div key={t.id} style={{ background: "#0f1729", border: "1px solid #312e81", borderLeft: "3px solid #6366f1", borderRadius: 10, padding: "13px 17px", display: "flex", alignItems: "flex-start", gap: 12 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", marginBottom: 5 }}>
+                    <span style={{ background: "rgba(99,102,241,0.25)", color: "#a5b4fc", borderRadius: 20, padding: "2px 9px", fontSize: 10, fontWeight: 700, letterSpacing: "0.05em" }}>🤖 AI</span>
+                    <span style={{ background: sc.bg, color: sc.color, borderRadius: 20, padding: "2px 9px", fontSize: 11, fontWeight: 700 }}>{sc.label} {t.score}/10</span>
+                    <StatusBadge status={t.status} />
+                    {stage.label && <span style={{ background: stage.bg, color: stage.color, borderRadius: 20, padding: "2px 9px", fontSize: 10, fontWeight: 600 }}>{stage.label}</span>}
+                    <span style={{ background: "rgba(71,85,105,0.15)", color: "#475569", borderRadius: 20, padding: "2px 8px", fontSize: 10 }}>{t.source}</span>
+                    <span style={{ color: "#334155", fontSize: 10, marginLeft: "auto" }}>{t.published}</span>
+                  </div>
+                  <div style={{ fontWeight: 700, fontSize: 14, color: "#f1f5f9", marginBottom: 2 }}>{t.org}</div>
+                  <div style={{ color: "#94a3b8", fontSize: 12, marginBottom: 4 }}>{t.title}</div>
+                  {t.scoreReason && (
+                    <div style={{ fontSize: 11, color: "#475569", fontStyle: "italic" }}>💡 {t.scoreReason}</div>
+                  )}
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
+                  <button
+                    onClick={() => onTrackSignal(t)}
+                    style={{ background: "rgba(99,102,241,0.2)", border: "1px solid #4338ca", color: "#a5b4fc", padding: "6px 14px", borderRadius: 7, cursor: "pointer", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}
+                    onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(99,102,241,0.35)")}
+                    onMouseLeave={(e) => (e.currentTarget.style.background = "rgba(99,102,241,0.2)")}
+                  >
+                    Track →
+                  </button>
+                  {t.url && (
+                    <a href={t.url} target="_blank" rel="noopener noreferrer" style={{ background: "transparent", border: "1px solid #334155", color: "#64748b", padding: "5px 11px", borderRadius: 7, textDecoration: "none", fontSize: 11, textAlign: "center" }}>Open →</a>
+                  )}
+                </div>
+              </div>
+            );
+          }
+
+          // ── Manual tracked tender card ──
           const tr = tracking[t.id] || {};
           const stage = PIPELINE_STAGES.find((s) => s.id === (tr.stage || "watching")) || PIPELINE_STAGES[0];
           const secColor = SECTOR_COLORS[t.sector] || "#6366f1";
@@ -392,7 +504,7 @@ function TabTenders({ tenders, tracking, onOpen, onAdd, onExport }) {
       </div>
 
       <div style={{ marginTop: 14, padding: "10px 14px", background: "rgba(99,102,241,0.06)", border: "1px solid rgba(99,102,241,0.2)", borderRadius: 8, fontSize: 11, color: "#6366f1" }}>
-        💡 <strong>Click any tender</strong> to set pipeline stage, add notes & deadline. Use <strong>+ Add Tender</strong> for new ones discovered manually.
+        💡 <strong>Click any tracked tender</strong> to set pipeline stage, add notes & deadline. <strong>🤖 AI tenders</strong> are auto-detected every 6h — click <strong>Track →</strong> to add to your pipeline.
       </div>
     </div>
   );
@@ -945,7 +1057,7 @@ export default function App() {
   const inPipeline = tenders.filter((t) => tracking[t.id]?.stage && tracking[t.id].stage !== "watching").length;
 
   const convertSignalToTender = (signal) => {
-    const newTender = {
+    saveTender({
       id: Date.now(),
       org: signal.org || signal.source || "Unknown",
       title: signal.title,
@@ -957,9 +1069,27 @@ export default function App() {
       notes: `Auto-detected via AI scanner. Source: ${signal.source}. Score: ${signal.score}/10. ${signal.score_reason || ""}`.trim(),
       deadline: "",
       isCustom: true,
-    };
-    saveTender(newTender);
+    });
     setActiveTab("tenders");
+  };
+
+  const trackSignal = async (aiItem) => {
+    try {
+      await fetch(`${API_BASE}/api/signals/${aiItem._signalId}/convert`, { method: "POST" });
+    } catch {}
+    saveTender({
+      id: Date.now(),
+      org: aiItem.org,
+      title: aiItem.title,
+      sector: aiItem.sector,
+      status: aiItem.status,
+      value: "TBC",
+      published: aiItem.published,
+      url: aiItem.url,
+      notes: `🤖 AI Score: ${aiItem.score}/10 — ${aiItem.scoreReason || ""}`.trim(),
+      deadline: "",
+      isCustom: true,
+    });
   };
 
   const TABS = [
@@ -1024,6 +1154,7 @@ export default function App() {
             onOpen={(t) => setDetailTender(t)}
             onAdd={() => setEditTender({})}
             onExport={() => exportCSV(tenders, tracking)}
+            onTrackSignal={trackSignal}
           />
         )}
         {activeTab === "pipeline" && (
