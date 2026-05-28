@@ -453,6 +453,9 @@ function TabTenders({ tenders, tracking, onOpen, onAdd, onExport, onTrackSignal 
                     <div style={{ marginTop: 5, background: "rgba(168,85,247,0.07)", border: "1px solid rgba(168,85,247,0.2)", borderRadius: 6, padding: "5px 9px", fontSize: 11 }}>
                       <span style={{ color: "#a855f7", fontWeight: 700 }}>🔍 Current ERP: </span>
                       <span style={{ color: "#c4b5fd" }}>{t.buyer_intel.current_erp || "Unknown"}</span>
+                      {t.buyer_intel.contract_expiry && t.buyer_intel.contract_expiry !== "Unknown" && (
+                        <span style={{ color: "#f59e0b", fontWeight: 600 }}> | expires {t.buyer_intel.contract_expiry}</span>
+                      )}
                       {t.buyer_intel.notes && (
                         <span style={{ color: "#7c3aed" }}> — {t.buyer_intel.notes}</span>
                       )}
@@ -845,6 +848,9 @@ function SignalCard({ signal, onConvert }) {
             <div style={{ marginTop: 5, background: "rgba(168,85,247,0.07)", border: "1px solid rgba(168,85,247,0.2)", borderRadius: 6, padding: "5px 9px", fontSize: 11 }}>
               <span style={{ color: "#a855f7", fontWeight: 700 }}>🔍 Current ERP: </span>
               <span style={{ color: "#c4b5fd" }}>{signal.buyer_intel.current_erp || "Unknown"}</span>
+              {signal.buyer_intel.contract_expiry && signal.buyer_intel.contract_expiry !== "Unknown" && (
+                <span style={{ color: "#f59e0b", fontWeight: 600 }}> | expires {signal.buyer_intel.contract_expiry}</span>
+              )}
               {signal.buyer_intel.notes && (
                 <span style={{ color: "#7c3aed" }}> — {signal.buyer_intel.notes}</span>
               )}

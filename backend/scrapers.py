@@ -907,6 +907,7 @@ async def run_all_scrapers() -> tuple[list[dict], list[str]]:
         "Crawl4AI": scrape_crawl4ai(),
         "TED Europa": scrape_ted_europa(),
         "Contract Registers": scrape_contract_registers(),
+        "Exa Neural Search": scrape_exa(),
     }
 
     all_signals = []
@@ -1610,4 +1611,80 @@ async def scrape_contract_registers() -> list[dict]:
             await asyncio.sleep(0.2)
 
     logger.info(f"[contracts] {len(results)} ERP contract expiry signals total")
+    return results
+
+
+# ── 15. Exa.ai — Neural / semantic search ────────────────────────────────────
+#
+# Unlike Tavily/Brave (keyword), Exa uses neural embeddings to find semantically
+# relevant documents that never mention "ERP" or "tender" explicitly:
+# council board papers, IT strategy PDFs, digital transformation roadmaps.
+# Free tier: 1000 searches/month. Get key at exa.ai.
+
+EXA_QUERIES = [
+    "UK council ERP finance system replacement procurement programme 2026",
+    "NHS trust financial management system tender enterprise resource planning",
+    "local authority ICT strategy ERP replacement board paper committee minutes",
+    "SAP Oracle Unit4 Dynamics 365 contract renewal UK public sector procurement",
+    "prior information notice finance system UK council digital transformation",
+    "ERP selection programme manager job UK council NHS 2025 2026",
+]
+
+
+async def scrape_exa() -> list[dict]:
+    """
+    Exa.ai — neural/semantic search engine.
+    Finds council board papers, IT strategies, digital roadmaps that keyword
+    search engines miss. Returns full text snippets for richer signals.
+    Requires EXA_API_KEY (exa.ai — free tier 1000/month).
+    """
+    api_key = os.getenv("EXA_API_KEY", "")
+    if not api_key:
+        logger.info("[exa] no EXA_API_KEY — skipped")
+        return []
+
+    results = []
+
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        for query in EXA_QUERIES:
+            try:
+                resp = await client.post(
+                    "https://api.exa.ai/search",
+                    headers={"x-api-key": api_key, "Content-Type": "application/json"},
+                    json={
+                        "query": query,
+                        "type": "neural",
+                        "numResults": 8,
+                        "useAutoprompt": True,
+                        "contents": {"text": {"maxCharacters": 800}},
+                    },
+                )
+                if resp.status_code != 200:
+                    logger.warning(f"[exa] HTTP {resp.status_code}: {query[:40]}")
+                    continue
+
+                for item in resp.json().get("results", []):
+                    title = item.get("title", "")
+                    text = item.get("text") or ""
+                    url_e = item.get("url", "")
+                    published = (item.get("publishedDate") or "")[:10]
+                    combined = title + " " + text
+                    if _erp_score(combined) == 0:
+                        continue
+                    results.append({
+                        "source": "Exa Neural Search",
+                        "title": title,
+                        "org": item.get("author") or "",
+                        "url": url_e,
+                        "summary": text[:500],
+                        "sector": "Unknown",
+                        "keywords": _extract_keywords(combined),
+                        "published": published,
+                        "detected_at": NOW(),
+                    })
+
+            except Exception as e:
+                logger.warning(f"[exa] {type(e).__name__}: {e}")
+
+    logger.info(f"[exa] {len(results)} ERP signals")
     return results
