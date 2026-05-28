@@ -2,10 +2,11 @@
 Buyer intelligence enrichment.
 For high-score signals (>=8), researches the buying organisation's ERP situation.
 
-Priority chain:
-  1. Perplexity sonar-online  — one call, synthesized answer + live web citations
-  2. Tavily + GPT-4o-mini     — fallback if no PERPLEXITY_API_KEY
-  3. Skip                     — if neither key available
+Priority chain (all free):
+  1. Exa.ai + GPT-4o-mini    — neural search, finds board papers & IT strategies
+  2. Jina Search + GPT-4o-mini — 100% free, no API key, web search + content
+  3. Tavily + GPT-4o-mini    — standard search fallback
+  4. Skip                    — if OPENAI_API_KEY not set
 
 Capped at MAX_ENRICHMENTS per scan to preserve free-tier quotas.
 """
@@ -14,58 +15,123 @@ import json
 import re
 import logging
 import asyncio
+import urllib.parse
 
 logger = logging.getLogger(__name__)
 
 MAX_ENRICHMENTS = 5
 
-_INTEL_PROMPT = """You are researching a UK public sector organisation's ERP/finance system situation.
+_SYNTHESIS_PROMPT = """You are analysing research snippets about a UK public sector organisation.
+
 Organisation: {org}
 
-Find their current ERP or financial management system, the contract expiry date if available,
-and any procurement or replacement plans.
+Research findings:
+{context}
 
-Return ONLY a JSON object (no markdown, no explanation):
+Extract what you can and return ONLY a JSON object (no markdown):
 {{
-  "current_erp": "name of current ERP system, or Unknown",
+  "current_erp": "name of their current ERP/finance system, or Unknown",
   "contract_expiry": "contract end date if found (e.g. Mar 2026), else Unknown",
   "notes": "one precise sentence: most important finding about their ERP procurement situation"
 }}"""
 
 
-async def _enrich_with_perplexity(org: str, api_key: str) -> dict | None:
-    """Perplexity sonar-online: one API call, live web search + synthesized answer."""
+async def _synthesise_with_gpt(org: str, snippets: list[str], openai_key: str) -> dict | None:
+    """Synthesise research snippets into structured buyer intel using GPT-4o-mini."""
+    from openai import AsyncOpenAI
+    context = "\n\n".join(snippets[:6])
     try:
-        from openai import AsyncOpenAI
-        client = AsyncOpenAI(api_key=api_key, base_url="https://api.perplexity.ai")
+        client = AsyncOpenAI(api_key=openai_key)
         response = await client.chat.completions.create(
-            model="llama-3.1-sonar-small-128k-online",
-            messages=[{"role": "user", "content": _INTEL_PROMPT.format(org=org)}],
+            model="gpt-4o-mini",
             max_tokens=200,
             temperature=0,
+            messages=[{"role": "user", "content": _SYNTHESIS_PROMPT.format(org=org, context=context)}],
         )
         raw = response.choices[0].message.content.strip()
         m = re.search(r"\{.*\}", raw, re.DOTALL)
         if m:
-            intel = json.loads(m.group())
-            logger.debug(f"[enricher:perplexity] {org}: {intel.get('current_erp')} | {intel.get('contract_expiry')}")
-            return intel
+            return json.loads(m.group())
     except Exception as e:
-        logger.warning(f"[enricher:perplexity] {org}: {type(e).__name__}: {e}")
+        logger.warning(f"[enricher:gpt] {org}: {type(e).__name__}: {e}")
     return None
 
 
-async def _enrich_with_tavily_gpt(org: str, tavily_key: str, openai_key: str) -> dict | None:
-    """Fallback: 2 Tavily searches → GPT-4o-mini synthesis."""
+async def _research_with_exa(org: str, api_key: str) -> list[str]:
+    """Use Exa neural search to find relevant documents about the org's ERP situation."""
     import httpx
-    from openai import AsyncOpenAI
+    queries = [
+        f"{org} ERP finance system contract expiry replacement",
+        f"{org} digital transformation ICT strategy procurement",
+    ]
+    snippets: list[str] = []
+    async with httpx.AsyncClient(timeout=20) as client:
+        for query in queries:
+            try:
+                resp = await client.post(
+                    "https://api.exa.ai/search",
+                    headers={"x-api-key": api_key, "Content-Type": "application/json"},
+                    json={
+                        "query": query,
+                        "type": "neural",
+                        "numResults": 4,
+                        "useAutoprompt": True,
+                        "contents": {"text": {"maxCharacters": 600}},
+                    },
+                )
+                if resp.status_code == 200:
+                    for item in resp.json().get("results", []):
+                        text = item.get("text") or ""
+                        title = item.get("title", "")
+                        if text:
+                            snippets.append(f"{title}\n{text[:500]}")
+            except Exception as e:
+                logger.warning(f"[enricher:exa] {org}: {type(e).__name__}: {e}")
+    return snippets
 
+
+async def _research_with_jina(org: str) -> list[str]:
+    """
+    Jina AI Search — completely free, no API key.
+    s.jina.ai converts web search results into clean LLM-ready text.
+    """
+    import httpx
+    queries = [
+        f"{org} ERP finance system contract",
+        f"{org} digital transformation procurement",
+    ]
+    snippets: list[str] = []
+    async with httpx.AsyncClient(timeout=25, follow_redirects=True) as client:
+        for query in queries:
+            try:
+                url = f"https://s.jina.ai/{urllib.parse.quote(query)}"
+                resp = await client.get(
+                    url,
+                    headers={
+                        "Accept": "application/json",
+                        "X-With-Links-Summary": "false",
+                    },
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    for item in (data.get("data") or [])[:4]:
+                        content = item.get("content") or item.get("description", "")
+                        title = item.get("title", "")
+                        if content:
+                            snippets.append(f"{title}\n{content[:500]}")
+            except Exception as e:
+                logger.warning(f"[enricher:jina] {org}: {type(e).__name__}: {e}")
+    return snippets
+
+
+async def _research_with_tavily(org: str, tavily_key: str) -> list[str]:
+    """Tavily standard search fallback."""
+    import httpx
     queries = [
         f"{org} ERP system current software finance HR",
         f"{org} digital transformation finance system replacement procurement",
     ]
     snippets: list[str] = []
-
     async with httpx.AsyncClient(timeout=20) as client:
         for q in queries:
             try:
@@ -81,66 +147,52 @@ async def _enrich_with_tavily_gpt(org: str, tavily_key: str, openai_key: str) ->
                             snippets.append(content[:400])
             except Exception as e:
                 logger.warning(f"[enricher:tavily] {org}: {type(e).__name__}: {e}")
-
-    if not snippets:
-        return None
-
-    context = "\n\n".join(snippets[:6])
-    prompt = f"""Organisation: {org}
-
-Web research snippets:
-{context}
-
-{_INTEL_PROMPT.format(org=org)}"""
-
-    try:
-        oai = AsyncOpenAI(api_key=openai_key)
-        response = await oai.chat.completions.create(
-            model="gpt-4o-mini",
-            max_tokens=200,
-            temperature=0,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        raw = response.choices[0].message.content.strip()
-        m = re.search(r"\{.*\}", raw, re.DOTALL)
-        if m:
-            intel = json.loads(m.group())
-            logger.debug(f"[enricher:tavily+gpt] {org}: {intel.get('current_erp')}")
-            return intel
-    except Exception as e:
-        logger.warning(f"[enricher:gpt] {org}: {type(e).__name__}: {e}")
-
-    return None
+    return snippets
 
 
 async def enrich_buyer(signal: dict) -> dict:
     """
     Research a buying organisation and extract ERP intelligence.
-    Tries Perplexity first (live web, one call).
-    Falls back to Tavily + GPT-4o-mini if PERPLEXITY_API_KEY not set.
-    Returns signal with 'buyer_intel' = {current_erp, contract_expiry, notes}.
+    Priority: Exa → Jina (free) → Tavily.
+    All routes synthesised by GPT-4o-mini.
+    Skips signals already enriched from a contract register (confirmed data).
     """
     org = (signal.get("org") or "").strip()
     if not org:
         return signal
 
-    # Skip if already enriched from contract register (confirmed data — don't overwrite)
+    # Don't overwrite confirmed contract register data
     existing = signal.get("buyer_intel")
     if existing and existing.get("current_erp") and existing.get("current_erp") != "Unknown":
         return signal
 
-    perplexity_key = os.getenv("PERPLEXITY_API_KEY", "")
-    tavily_key = os.getenv("TAVILY_API_KEY", "")
     openai_key = os.getenv("OPENAI_API_KEY", "")
+    if not openai_key:
+        return signal
 
-    intel = None
+    exa_key = os.getenv("EXA_API_KEY", "")
+    tavily_key = os.getenv("TAVILY_API_KEY", "")
 
-    if perplexity_key:
-        intel = await _enrich_with_perplexity(org, perplexity_key)
-    elif tavily_key and openai_key:
-        intel = await _enrich_with_tavily_gpt(org, tavily_key, openai_key)
+    snippets: list[str] = []
 
+    if exa_key:
+        snippets = await _research_with_exa(org, exa_key)
+        method = "exa"
+
+    if not snippets:
+        snippets = await _research_with_jina(org)
+        method = "jina"
+
+    if not snippets and tavily_key:
+        snippets = await _research_with_tavily(org, tavily_key)
+        method = "tavily"
+
+    if not snippets:
+        return signal
+
+    intel = await _synthesise_with_gpt(org, snippets, openai_key)
     if intel:
+        logger.debug(f"[enricher:{method}] {org}: {intel.get('current_erp')} | {intel.get('contract_expiry')}")
         signal = {**signal, "buyer_intel": intel}
 
     return signal
@@ -157,7 +209,8 @@ async def enrich_signals(signals: list[dict]) -> list[dict]:
     if not to_enrich:
         return signals
 
-    method = "Perplexity" if os.getenv("PERPLEXITY_API_KEY") else "Tavily+GPT"
+    exa_key = os.getenv("EXA_API_KEY", "")
+    method = "Exa+GPT" if exa_key else "Jina+GPT"
     logger.info(f"[enricher] enriching {len(to_enrich)} buyers via {method} (of {len(candidates)} eligible)")
 
     enriched_map: dict[int, dict] = {}
