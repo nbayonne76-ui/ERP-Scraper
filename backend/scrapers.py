@@ -10,7 +10,14 @@ import httpx
 import feedparser
 import os
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, date, timezone
+
+try:
+    import pandas as _pd
+    import io as _io
+    _PANDAS_OK = True
+except ImportError:
+    _PANDAS_OK = False
 
 logger = logging.getLogger(__name__)
 
@@ -592,6 +599,295 @@ async def scrape_ted_europa() -> list[dict]:
     return results
 
 
+# ── 14. Contract Registers — ERP contract expiry intelligence ─────────────────
+#
+# UK councils and NHS trusts are legally required to publish contract registers.
+# These contain supplier, value, start date, and END DATE.
+# An ERP contract ending in 0-18 months = procurement starting NOW.
+# Source: data.gov.uk — thousands of councils submit their registers here.
+# Key advantage: we know the CURRENT ERP vendor for free, no Tavily needed.
+
+_CR_VENDORS = [
+    "unit4", "agresso", "business world",
+    "oracle financials", "oracle erp", "e-business suite", "oracle ebs",
+    "sap s/4", "sap hana", "sap r/3", "sap erp",
+    "dynamics 365", "dynamics ax", "dynamics nav", "d365 finance",
+    "workday", "infor cloudsuite", "infor ln",
+    "civica financials", "integra finance",
+    "exchequer", "sun systems", "sunsystems",
+    "cedar financial", "itrent", "mhr analytics",
+    "netsuite", "sage intacct", "sage 200",
+    "epicor",
+]
+
+_CR_DESCS = [
+    "enterprise resource planning", "erp system", "erp solution",
+    "finance system", "financial management system",
+    "payroll system", "hr and payroll", "payroll and hr",
+    "back office system", "integrated financial system",
+]
+
+_CR_SAP_RE = re.compile(r'\bsap\b', re.IGNORECASE)
+
+
+def _cr_find_col(columns: list, *candidates: str) -> str | None:
+    """Find a column by exact then partial match, longest candidate first."""
+    cols_lower = {str(c).lower().strip(): c for c in columns}
+    for cand in candidates:
+        if cand.lower() in cols_lower:
+            return cols_lower[cand.lower()]
+    for cand in sorted(candidates, key=len, reverse=True):
+        for col_l, col_orig in cols_lower.items():
+            if cand.lower() in col_l:
+                return col_orig
+    return None
+
+
+def _cr_is_erp_row(supplier: str, description: str) -> bool:
+    combined = (supplier + " " + description).lower()
+    if any(v in combined for v in _CR_VENDORS):
+        return True
+    if any(d in combined for d in _CR_DESCS):
+        return True
+    if _CR_SAP_RE.search(combined):
+        return True
+    return False
+
+
+def _cr_parse_date(val) -> date | None:
+    if val is None:
+        return None
+    s = str(val).strip()
+    if not s or s.lower() in ("nan", "none", "n/a", "tbc", "ongoing", "perpetual", "rolling", ""):
+        return None
+    s = s[:10]
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _cr_expiry_score(end_date: date) -> tuple[int, str]:
+    today = date.today()
+    months = (end_date.year - today.year) * 12 + end_date.month - today.month
+    if months < -6:
+        return 0, ""
+    elif months < 0:
+        return 7, f"Expired {abs(months)}m ago — may be extending or re-procuring"
+    elif months <= 3:
+        return 10, f"Expires in {months}m — tender should be LIVE NOW"
+    elif months <= 6:
+        return 10, f"Expires in {months}m — tender imminent"
+    elif months <= 12:
+        return 9, f"Expires in {months}m — procurement starting"
+    elif months <= 18:
+        return 8, f"Expires in {months}m — planning phase"
+    elif months <= 24:
+        return 7, f"Expires in {months}m — early signal"
+    elif months <= 36:
+        return 6, f"Expires in {months}m — watch list"
+    return 0, ""
+
+
+def _cr_clean_value(raw: str) -> str:
+    if not raw or raw.lower() in ("nan", "none", ""):
+        return "TBC"
+    clean = re.sub(r"[£$€,\s]", "", raw)
+    try:
+        v = float(clean)
+        if v >= 1_000_000:
+            return f"£{v / 1_000_000:.1f}m"
+        elif v >= 1_000:
+            return f"£{v:,.0f}"
+        return f"£{v:.0f}"
+    except ValueError:
+        return raw[:30] if raw else "TBC"
+
+
+def _cr_parse_df(df, org_name: str, source_url: str) -> list[dict]:
+    """Extract ERP signals from a contract register dataframe."""
+    cols = list(df.columns)
+    supplier_col = _cr_find_col(cols, "supplier", "vendor", "contractor", "provider",
+                                "supplier name", "company name", "organisation")
+    desc_col = _cr_find_col(cols, "description", "contract description", "title",
+                            "service", "goods/services", "contract title", "detail")
+    end_col = _cr_find_col(cols, "end date", "expiry date", "contract end",
+                           "termination date", "end", "expiry", "expires", "contract expiry")
+    start_col = _cr_find_col(cols, "start date", "commencement date",
+                             "contract start", "start", "commencement")
+    value_col = _cr_find_col(cols, "value", "contract value", "annual value",
+                             "total value", "amount", "total contract value")
+
+    results = []
+    for _, row in df.iterrows():
+        supplier = str(row[supplier_col] if supplier_col else "").strip()
+        description = str(row[desc_col] if desc_col else "").strip()
+        if not supplier and not description:
+            continue
+        if not _cr_is_erp_row(supplier, description):
+            continue
+
+        end_date = _cr_parse_date(row[end_col] if end_col else None)
+        start_date = _cr_parse_date(row[start_col] if start_col else None)
+
+        if end_date:
+            score, urgency = _cr_expiry_score(end_date)
+            if score == 0:
+                continue
+            erp_stage = "active-tender" if score >= 9 else "pre-market" if score >= 7 else "awareness"
+            deadline_str = str(end_date)
+        else:
+            score, urgency = 5, "Active ERP contract — expiry date not published"
+            erp_stage = "awareness"
+            deadline_str = ""
+
+        value = _cr_clean_value(str(row[value_col] if value_col else ""))
+        label = description[:60] if description else supplier
+        title = f"{supplier} — {label} | expires {end_date.strftime('%b %Y') if end_date else 'unknown'} | {org_name}"
+        summary = (
+            f"[CONTRACT REGISTER] {org_name} | Current ERP/supplier: {supplier} | "
+            f"Value: {value} | Start: {start_date or 'unknown'} | "
+            f"End: {end_date or 'unknown'} | {urgency}"
+        )
+
+        results.append({
+            "source": "Contract Register",
+            "title": title[:200],
+            "org": org_name,
+            "url": source_url,
+            "summary": summary,
+            "sector": "Public",
+            "keywords": _extract_keywords(supplier + " " + description) + ["contract register", "expiry"],
+            "published": str(start_date or ""),
+            "detected_at": NOW(),
+            "value": value,
+            "deadline": deadline_str,
+            "erp_stage": erp_stage,
+            "buyer_intel": {
+                "current_erp": supplier,
+                "notes": f"Confirmed from contract register. Contract expires {end_date or 'unknown'}. Value {value}.",
+            },
+        })
+
+    return results
+
+
+async def scrape_contract_registers() -> list[dict]:
+    """
+    Scrapes UK council and NHS contract registers from data.gov.uk.
+    Councils are legally required to publish these — they show current ERP vendor,
+    contract value, and critically: the EXPIRY DATE.
+    A contract expiring in <18 months = procurement starting now, tender in 6-12m.
+    No API key required. Requires: pip install pandas openpyxl
+    """
+    if not _PANDAS_OK:
+        logger.warning("[contracts] pandas not installed — run: pip install pandas openpyxl")
+        return []
+
+    datasets: list[dict] = []
+
+    # Discover contract register datasets published to data.gov.uk
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+            for page in range(3):  # up to 300 datasets
+                resp = await client.get(
+                    "https://data.gov.uk/api/3/action/package_search",
+                    params={
+                        "q": "contracts register",
+                        "rows": 100,
+                        "start": page * 100,
+                        "sort": "metadata_modified desc",
+                    },
+                    headers={"User-Agent": UA, "Accept": "application/json"},
+                )
+                if resp.status_code != 200:
+                    break
+                pkgs = resp.json().get("result", {}).get("results", [])
+                if not pkgs:
+                    break
+
+                for pkg in pkgs:
+                    org = (pkg.get("organization") or {})
+                    org_name = org.get("title") or pkg.get("title", "")
+                    org_l = org_name.lower()
+                    # Local authorities and NHS only
+                    if not any(kw in org_l for kw in [
+                        "council", "borough", "district", "county", "city of",
+                        "nhs", "trust", "authority", "foundation", "combined authority",
+                    ]):
+                        continue
+
+                    # Pick best resource format: CSV > XLSX > XLS
+                    resources = pkg.get("resources", [])
+                    chosen = None
+                    for fmt in ("CSV", "XLSX", "XLS"):
+                        matches = [
+                            r for r in resources
+                            if r.get("format", "").upper().strip() == fmt and r.get("url")
+                        ]
+                        if matches:
+                            chosen = {"org": org_name, "url": matches[0]["url"], "fmt": fmt}
+                            break
+                    if chosen:
+                        datasets.append(chosen)
+
+    except Exception as e:
+        logger.warning(f"[contracts] data.gov.uk discovery: {type(e).__name__}: {e}")
+
+    logger.info(f"[contracts] {len(datasets)} contract register datasets found on data.gov.uk")
+
+    results: list[dict] = []
+
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        for ds in datasets[:50]:  # max 50 per scan
+            try:
+                resp = await client.get(ds["url"], headers={"User-Agent": UA})
+                if resp.status_code != 200:
+                    continue
+                if len(resp.content) > 8 * 1024 * 1024:  # 8 MB limit
+                    logger.debug(f"[contracts] {ds['org']}: file too large, skipping")
+                    continue
+
+                content = resp.content
+                df = None
+
+                if ds["fmt"] == "CSV":
+                    for enc in ("utf-8-sig", "utf-8", "latin-1", "cp1252"):
+                        try:
+                            df = _pd.read_csv(
+                                _io.BytesIO(content), encoding=enc,
+                                dtype=str, on_bad_lines="skip", low_memory=False,
+                            )
+                            break
+                        except Exception:
+                            continue
+                else:
+                    try:
+                        df = _pd.read_excel(_io.BytesIO(content), dtype=str)
+                    except Exception:
+                        pass
+
+                if df is None or df.empty:
+                    continue
+
+                df.columns = [str(c).strip() for c in df.columns]
+                signals = _cr_parse_df(df, ds["org"], ds["url"])
+                results.extend(signals)
+
+                if signals:
+                    logger.info(f"[contracts] {ds['org']}: {len(signals)} ERP contracts expiring ≤36m")
+
+            except Exception as e:
+                logger.debug(f"[contracts] {ds['org']}: {type(e).__name__}: {e}")
+
+            await asyncio.sleep(0.2)
+
+    logger.info(f"[contracts] {len(results)} ERP contract expiry signals total")
+    return results
+
+
 # ── Master runner ─────────────────────────────────────────────────────────────
 
 async def run_all_scrapers() -> tuple[list[dict], list[str]]:
@@ -610,6 +906,7 @@ async def run_all_scrapers() -> tuple[list[dict], list[str]]:
         "Firecrawl": scrape_firecrawl(),
         "Crawl4AI": scrape_crawl4ai(),
         "TED Europa": scrape_ted_europa(),
+        "Contract Registers": scrape_contract_registers(),
     }
 
     all_signals = []
@@ -1021,4 +1318,296 @@ async def scrape_crawl4ai() -> list[dict]:
         logger.warning(f"[crawl4ai] browser init failed: {type(e).__name__}: {e}")
 
     logger.info(f"[crawl4ai] {len(results)} ERP signals")
+    return results
+
+
+# ── 14. Contract Registers — ERP contract expiry intelligence ─────────────────
+#
+# UK councils and NHS trusts are legally required to publish contract registers.
+# They contain: supplier name, contract value, start date, and END DATE.
+# An ERP contract ending in 0-18 months = procurement starting NOW.
+# Source: data.gov.uk — councils submit their registers here as open data.
+# Key advantage: we get the confirmed current ERP vendor for free.
+
+_CR_VENDORS = [
+    "unit4", "agresso", "business world",
+    "oracle financials", "oracle erp", "e-business suite", "oracle ebs",
+    "sap s/4", "sap hana", "sap r/3", "sap erp",
+    "dynamics 365", "dynamics ax", "dynamics nav", "d365 finance",
+    "workday", "infor cloudsuite", "infor ln",
+    "civica financials", "integra finance",
+    "exchequer", "sun systems", "sunsystems",
+    "cedar financial", "itrent", "mhr analytics",
+    "netsuite", "sage intacct", "sage 200",
+    "epicor",
+]
+
+_CR_DESCS = [
+    "enterprise resource planning", "erp system", "erp solution",
+    "finance system", "financial management system",
+    "payroll system", "hr and payroll", "payroll and hr",
+    "back office system", "integrated financial system",
+]
+
+_CR_SAP_RE = re.compile(r'\bsap\b', re.IGNORECASE)
+
+
+def _cr_find_col(columns: list, *candidates: str) -> str | None:
+    """Find a column by exact then partial match, longest candidate first."""
+    cols_lower = {str(c).lower().strip(): c for c in columns}
+    for cand in candidates:
+        if cand.lower() in cols_lower:
+            return cols_lower[cand.lower()]
+    for cand in sorted(candidates, key=len, reverse=True):
+        for col_l, col_orig in cols_lower.items():
+            if cand.lower() in col_l:
+                return col_orig
+    return None
+
+
+def _cr_is_erp_row(supplier: str, description: str) -> bool:
+    combined = (supplier + " " + description).lower()
+    if any(v in combined for v in _CR_VENDORS):
+        return True
+    if any(d in combined for d in _CR_DESCS):
+        return True
+    if _CR_SAP_RE.search(combined):
+        return True
+    return False
+
+
+def _cr_parse_date(val) -> date | None:
+    if val is None:
+        return None
+    s = str(val).strip()
+    if not s or s.lower() in ("nan", "none", "n/a", "tbc", "ongoing", "perpetual", "rolling", ""):
+        return None
+    s = s[:10]
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%d/%m/%y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _cr_expiry_score(end_date: date) -> tuple[int, str]:
+    today = date.today()
+    months = (end_date.year - today.year) * 12 + end_date.month - today.month
+    if months < -6:
+        return 0, ""
+    elif months < 0:
+        return 7, f"Expired {abs(months)}m ago — may be extending or re-procuring"
+    elif months <= 3:
+        return 10, f"Expires in {months}m — tender should be LIVE NOW"
+    elif months <= 6:
+        return 10, f"Expires in {months}m — tender imminent"
+    elif months <= 12:
+        return 9, f"Expires in {months}m — procurement starting"
+    elif months <= 18:
+        return 8, f"Expires in {months}m — planning phase"
+    elif months <= 24:
+        return 7, f"Expires in {months}m — early signal"
+    elif months <= 36:
+        return 6, f"Expires in {months}m — watch list"
+    return 0, ""
+
+
+def _cr_clean_value(raw: str) -> str:
+    if not raw or raw.lower() in ("nan", "none", ""):
+        return "TBC"
+    clean = re.sub(r"[£$€,\s]", "", raw)
+    try:
+        v = float(clean)
+        if v >= 1_000_000:
+            return f"£{v / 1_000_000:.1f}m"
+        elif v >= 1_000:
+            return f"£{v:,.0f}"
+        return f"£{v:.0f}"
+    except ValueError:
+        return raw[:30] if raw else "TBC"
+
+
+def _cr_parse_df(df, org_name: str, source_url: str) -> list[dict]:
+    """Extract ERP signals from a contract register dataframe."""
+    cols = list(df.columns)
+    supplier_col = _cr_find_col(cols, "supplier", "vendor", "contractor", "provider",
+                                "supplier name", "company name", "organisation")
+    desc_col = _cr_find_col(cols, "description", "contract description", "title",
+                            "service", "goods/services", "contract title", "detail")
+    end_col = _cr_find_col(cols, "end date", "expiry date", "contract end",
+                           "termination date", "end", "expiry", "expires", "contract expiry")
+    start_col = _cr_find_col(cols, "start date", "commencement date",
+                             "contract start", "start", "commencement")
+    value_col = _cr_find_col(cols, "value", "contract value", "annual value",
+                             "total value", "amount", "total contract value")
+
+    results = []
+    for _, row in df.iterrows():
+        supplier = str(row[supplier_col] if supplier_col else "").strip()
+        description = str(row[desc_col] if desc_col else "").strip()
+        if not supplier and not description:
+            continue
+        if not _cr_is_erp_row(supplier, description):
+            continue
+
+        end_date = _cr_parse_date(row[end_col] if end_col else None)
+        start_date = _cr_parse_date(row[start_col] if start_col else None)
+
+        if end_date:
+            score, urgency = _cr_expiry_score(end_date)
+            if score == 0:
+                continue
+            erp_stage = "active-tender" if score >= 9 else "pre-market" if score >= 7 else "awareness"
+            deadline_str = str(end_date)
+        else:
+            score, urgency = 5, "Active ERP contract — expiry date not published"
+            erp_stage = "awareness"
+            deadline_str = ""
+
+        value = _cr_clean_value(str(row[value_col] if value_col else ""))
+        label = description[:60] if description else supplier
+        title = (
+            f"{supplier} — {label} | "
+            f"expires {end_date.strftime('%b %Y') if end_date else 'unknown'} | "
+            f"{org_name}"
+        )
+        summary = (
+            f"[CONTRACT REGISTER] {org_name} | Current ERP/supplier: {supplier} | "
+            f"Value: {value} | Start: {start_date or 'unknown'} | "
+            f"End: {end_date or 'unknown'} | {urgency}"
+        )
+
+        results.append({
+            "source": "Contract Register",
+            "title": title[:200],
+            "org": org_name,
+            "url": source_url,
+            "summary": summary,
+            "sector": "Public",
+            "keywords": _extract_keywords(supplier + " " + description) + ["contract register", "expiry"],
+            "published": str(start_date or ""),
+            "detected_at": NOW(),
+            "value": value,
+            "deadline": deadline_str,
+            "erp_stage": erp_stage,
+            "buyer_intel": {
+                "current_erp": supplier,
+                "notes": (
+                    f"Confirmed from published contract register. "
+                    f"Contract expires {end_date or 'unknown'}. Value {value}."
+                ),
+            },
+        })
+
+    return results
+
+
+async def scrape_contract_registers() -> list[dict]:
+    """
+    Scrapes UK council and NHS contract registers published on data.gov.uk.
+    Councils are legally required to publish these — they reveal the current ERP vendor
+    and, crucially, the contract EXPIRY DATE.
+    A contract expiring in <18 months means procurement is starting now.
+    No API key required. Requires: pip install pandas openpyxl
+    """
+    if not _PANDAS_OK:
+        logger.warning("[contracts] pandas not installed — run: pip install pandas openpyxl")
+        return []
+
+    datasets: list[dict] = []
+
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+            for page in range(3):  # up to 300 datasets
+                resp = await client.get(
+                    "https://data.gov.uk/api/3/action/package_search",
+                    params={
+                        "q": "contracts register",
+                        "rows": 100,
+                        "start": page * 100,
+                        "sort": "metadata_modified desc",
+                    },
+                    headers={"User-Agent": UA, "Accept": "application/json"},
+                )
+                if resp.status_code != 200:
+                    break
+                pkgs = resp.json().get("result", {}).get("results", [])
+                if not pkgs:
+                    break
+
+                for pkg in pkgs:
+                    org_name = (pkg.get("organization") or {}).get("title") or pkg.get("title", "")
+                    org_l = org_name.lower()
+                    if not any(kw in org_l for kw in [
+                        "council", "borough", "district", "county", "city of",
+                        "nhs", "trust", "authority", "foundation", "combined authority",
+                    ]):
+                        continue
+
+                    resources = pkg.get("resources", [])
+                    chosen = None
+                    for fmt in ("CSV", "XLSX", "XLS"):
+                        matches = [
+                            r for r in resources
+                            if r.get("format", "").upper().strip() == fmt and r.get("url")
+                        ]
+                        if matches:
+                            chosen = {"org": org_name, "url": matches[0]["url"], "fmt": fmt}
+                            break
+                    if chosen:
+                        datasets.append(chosen)
+
+    except Exception as e:
+        logger.warning(f"[contracts] data.gov.uk discovery: {type(e).__name__}: {e}")
+
+    logger.info(f"[contracts] {len(datasets)} contract register datasets on data.gov.uk")
+
+    results: list[dict] = []
+
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        for ds in datasets[:50]:
+            try:
+                resp = await client.get(ds["url"], headers={"User-Agent": UA})
+                if resp.status_code != 200:
+                    continue
+                if len(resp.content) > 8 * 1024 * 1024:
+                    logger.debug(f"[contracts] {ds['org']}: file too large, skipping")
+                    continue
+
+                content = resp.content
+                df = None
+
+                if ds["fmt"] == "CSV":
+                    for enc in ("utf-8-sig", "utf-8", "latin-1", "cp1252"):
+                        try:
+                            df = _pd.read_csv(
+                                _io.BytesIO(content), encoding=enc,
+                                dtype=str, on_bad_lines="skip", low_memory=False,
+                            )
+                            break
+                        except Exception:
+                            continue
+                else:
+                    try:
+                        df = _pd.read_excel(_io.BytesIO(content), dtype=str)
+                    except Exception:
+                        pass
+
+                if df is None or df.empty:
+                    continue
+
+                df.columns = [str(c).strip() for c in df.columns]
+                signals = _cr_parse_df(df, ds["org"], ds["url"])
+                results.extend(signals)
+
+                if signals:
+                    logger.info(f"[contracts] {ds['org']}: {len(signals)} ERP contracts expiring ≤36m")
+
+            except Exception as e:
+                logger.debug(f"[contracts] {ds['org']}: {type(e).__name__}: {e}")
+
+            await asyncio.sleep(0.2)
+
+    logger.info(f"[contracts] {len(results)} ERP contract expiry signals total")
     return results
