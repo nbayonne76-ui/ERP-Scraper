@@ -341,6 +341,7 @@ function TabTenders({ tenders, tracking, onOpen, onAdd, onExport, onTrackSignal 
       scoreReason: s.score_reason,
       erp_stage: s.erp_stage,
       source: s.source,
+      buyer_intel: s.buyer_intel || null,
     }));
 
   const allItems = [
@@ -447,6 +448,15 @@ function TabTenders({ tenders, tracking, onOpen, onAdd, onExport, onTrackSignal 
                   <div style={{ color: "#94a3b8", fontSize: 12, marginBottom: 4 }}>{t.title}</div>
                   {t.scoreReason && (
                     <div style={{ fontSize: 11, color: "#475569", fontStyle: "italic" }}>💡 {t.scoreReason}</div>
+                  )}
+                  {t.buyer_intel && (
+                    <div style={{ marginTop: 5, background: "rgba(168,85,247,0.07)", border: "1px solid rgba(168,85,247,0.2)", borderRadius: 6, padding: "5px 9px", fontSize: 11 }}>
+                      <span style={{ color: "#a855f7", fontWeight: 700 }}>🔍 Current ERP: </span>
+                      <span style={{ color: "#c4b5fd" }}>{t.buyer_intel.current_erp || "Unknown"}</span>
+                      {t.buyer_intel.notes && (
+                        <span style={{ color: "#7c3aed" }}> — {t.buyer_intel.notes}</span>
+                      )}
+                    </div>
                   )}
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
@@ -830,6 +840,15 @@ function SignalCard({ signal, onConvert }) {
           <div style={{ color: "#94a3b8", fontSize: 12, marginBottom: 4 }}>{signal.title}</div>
           {signal.score_reason && (
             <div style={{ fontSize: 11, color: "#475569", fontStyle: "italic" }}>💡 {signal.score_reason}</div>
+          )}
+          {signal.buyer_intel && (
+            <div style={{ marginTop: 5, background: "rgba(168,85,247,0.07)", border: "1px solid rgba(168,85,247,0.2)", borderRadius: 6, padding: "5px 9px", fontSize: 11 }}>
+              <span style={{ color: "#a855f7", fontWeight: 700 }}>🔍 Current ERP: </span>
+              <span style={{ color: "#c4b5fd" }}>{signal.buyer_intel.current_erp || "Unknown"}</span>
+              {signal.buyer_intel.notes && (
+                <span style={{ color: "#7c3aed" }}> — {signal.buyer_intel.notes}</span>
+              )}
+            </div>
           )}
           {signal.keywords?.length > 0 && (
             <div style={{ display: "flex", gap: 5, flexWrap: "wrap", marginTop: 6 }}>

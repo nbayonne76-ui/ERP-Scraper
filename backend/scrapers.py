@@ -3,6 +3,7 @@ Web scrapers for UK ERP tender signals.
 All sources are free / official APIs — no auth required except Companies House.
 """
 import re
+import json
 import asyncio
 import urllib.parse
 import httpx
@@ -415,42 +416,179 @@ async def scrape_companies_house() -> list[dict]:
 
 # ── 8. WhatDoTheyKnow — FOI requests as procurement signals ──────────────────
 
+WDTK_QUERIES = [
+    "enterprise resource planning",
+    "ERP finance system replacement",
+    "SAP Oracle Dynamics payroll",
+]
+
+
 async def scrape_whatdotheyknow() -> list[dict]:
     """
     FOI requests on WhatDoTheyKnow mentioning ERP/finance systems = org researching costs.
     Strong pre-procurement signal (6-18 months before formal tender).
+    Uses JSON search API with targeted ERP queries; RSS fallback on failure.
     """
     results = []
+    seen_ids: set[str] = set()
+
+    async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
+        # Primary: JSON search API — targeted ERP queries
+        for query in WDTK_QUERIES:
+            try:
+                resp = await client.get(
+                    "https://www.whatdotheyknow.com/search/" + urllib.parse.quote(query) + ".json",
+                    params={"variety": "request", "per_page": 20},
+                    headers={"User-Agent": UA, "Accept": "application/json"},
+                )
+                if resp.status_code != 200:
+                    logger.warning(f"[wdtk] JSON API {resp.status_code} for: {query}")
+                    continue
+                data = resp.json()
+                for item in (data.get("results") or []):
+                    info = item.get("info", {})
+                    foi_id = str(info.get("id", ""))
+                    if foi_id in seen_ids:
+                        continue
+                    seen_ids.add(foi_id)
+
+                    title = info.get("title", "")
+                    summary = info.get("summary", "")[:400]
+                    url_e = "https://www.whatdotheyknow.com" + info.get("url", "")
+                    published = info.get("created_at", "")[:10]
+                    public_body = info.get("public_body_name", "")
+                    combined = title + " " + summary
+                    if _erp_score(combined) == 0:
+                        continue
+                    results.append({
+                        "source": "WhatDoTheyKnow FOI",
+                        "title": f"FOI: {title}",
+                        "org": public_body,
+                        "url": url_e,
+                        "summary": f"[FOI REQUEST] {summary}",
+                        "sector": "Public",
+                        "keywords": _extract_keywords(combined),
+                        "published": published,
+                        "detected_at": NOW(),
+                    })
+            except Exception as e:
+                logger.warning(f"[wdtk:json] {type(e).__name__}: {e}")
+
+        # Fallback: RSS feed for any missed recent activity
+        if not results:
+            try:
+                resp = await client.get(
+                    "https://www.whatdotheyknow.com/feed/latest",
+                    headers={"User-Agent": UA}
+                )
+                feed = feedparser.parse(resp.text)
+                for entry in feed.entries[:30]:
+                    title = entry.get("title", "")
+                    summary = entry.get("summary", "")[:400]
+                    url_e = entry.get("link", "")
+                    published = entry.get("published", "")
+                    combined = title + " " + summary
+                    if _erp_score(combined) == 0:
+                        continue
+                    results.append({
+                        "source": "WhatDoTheyKnow FOI",
+                        "title": f"FOI: {title}",
+                        "org": entry.get("author", ""),
+                        "url": url_e,
+                        "summary": f"[FOI REQUEST] {summary}",
+                        "sector": "Public",
+                        "keywords": _extract_keywords(combined),
+                        "published": published,
+                        "detected_at": NOW(),
+                    })
+            except Exception as e:
+                logger.warning(f"[wdtk:rss] {type(e).__name__}: {e}")
+
+    logger.info(f"[whatdotheyknow] {len(results)} ERP signals")
+    return results
+
+
+# ── 13. TED Europa — EU Official Journal tenders ─────────────────────────────
+
+def _ted_text(*fields) -> str:
+    """Safely extract text from TED multilingual field (list or str)."""
+    parts = []
+    for f in fields:
+        if isinstance(f, list):
+            parts.extend(str(x) for x in f if x)
+        elif f:
+            parts.append(str(f))
+    return " ".join(parts)
+
+
+async def scrape_ted_europa() -> list[dict]:
+    """
+    TED (Tenders Electronic Daily) — EU Official Journal procurement database.
+    Covers UK-linked or multi-national ERP tenders still published post-Brexit.
+    Uses TED API v3 (free, optional TED_API_KEY for higher rate limits).
+    """
+    api_key = os.getenv("TED_API_KEY", "")
+    results = []
+
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    payload = {
+        "query": "enterprise resource planning ERP finance system",
+        "fields": ["ND", "TI", "CA", "PC", "DT", "OJ_URL", "CY", "TY"],
+        "filters": {"CY": ["GB", "IE"]},
+        "page": 1,
+        "pageSize": 50,
+        "sortField": "ND",
+        "sortOrder": "DESC",
+        "scope": "NOTICE",
+    }
+
     try:
-        async with httpx.AsyncClient(timeout=TIMEOUT, follow_redirects=True) as client:
-            resp = await client.get(
-                "https://www.whatdotheyknow.com/feed/latest",
-                headers={"User-Agent": UA}
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+            resp = await client.post(
+                "https://api.ted.europa.eu/v3/notices/search",
+                headers=headers,
+                json=payload,
             )
-            feed = feedparser.parse(resp.text)
-            for entry in feed.entries[:30]:
-                title = entry.get("title", "")
-                summary = entry.get("summary", "")[:400]
-                url_e = entry.get("link", "")
-                published = entry.get("published", "")
-                combined = title + " " + summary
+
+            if resp.status_code in (401, 403):
+                logger.info("[ted] auth required — skipped (set TED_API_KEY for access)")
+                return []
+            if resp.status_code != 200:
+                logger.warning(f"[ted] HTTP {resp.status_code}")
+                return []
+
+            data = resp.json()
+            for notice in data.get("notices", []):
+                title = _ted_text(notice.get("TI"))
+                org = _ted_text(notice.get("CA"))
+                published = str(notice.get("DT", ""))[:10]
+                nd = str(notice.get("ND", ""))
+                url_e = notice.get("OJ_URL") or f"https://ted.europa.eu/udl?uri=TED:NOTICE:{nd}:TEXT:EN:HTML"
+                notice_type = _ted_text(notice.get("TY"))
+
+                combined = title + " " + org
                 if _erp_score(combined) == 0:
                     continue
+
                 results.append({
-                    "source": "WhatDoTheyKnow FOI",
-                    "title": f"FOI: {title}",
-                    "org": entry.get("author", ""),
+                    "source": "TED Europa",
+                    "title": title,
+                    "org": org,
                     "url": url_e,
-                    "summary": f"[FOI REQUEST] {summary}",
+                    "summary": f"TED Notice {nd} | Type: {notice_type} | Country: {_ted_text(notice.get('CY'))}",
                     "sector": "Public",
                     "keywords": _extract_keywords(combined),
                     "published": published,
                     "detected_at": NOW(),
                 })
-    except Exception as e:
-        logger.warning(f"[whatdotheyknow] {type(e).__name__}: {e}")
 
-    logger.info(f"[whatdotheyknow] {len(results)} ERP signals")
+    except Exception as e:
+        logger.warning(f"[ted] {type(e).__name__}: {e}")
+
+    logger.info(f"[ted] {len(results)} ERP signals")
     return results
 
 
@@ -471,6 +609,7 @@ async def run_all_scrapers() -> tuple[list[dict], list[str]]:
         "Brave Search": scrape_brave_search(),
         "Firecrawl": scrape_firecrawl(),
         "Crawl4AI": scrape_crawl4ai(),
+        "TED Europa": scrape_ted_europa(),
     }
 
     all_signals = []
@@ -747,20 +886,28 @@ CRAWL4AI_TARGETS = [
         "url": "https://www.digitalmarketplace.service.gov.uk/g-cloud/search?q=erp+enterprise+resource+planning",
         "sector": "Public",
     },
-    {
-        "name": "TED Europa UK ERP",
-        "url": "https://ted.europa.eu/en/search/result?scope=NOTICE&fullText=ERP+enterprise+resource+planning+United+Kingdom&sortField=ND&sortOrder=LATEST",
-        "sector": "Public",
-    },
+    # TED Europa handled by dedicated scrape_ted_europa() using the v3 API
 ]
+
+_LLM_SCHEMA = {
+    "tenders": [
+        {
+            "title": "string — tender or contract title",
+            "organisation": "string — buying organisation name",
+            "deadline": "string — submission deadline if visible, else empty",
+            "value": "string — estimated contract value if visible, else empty",
+            "url": "string — direct URL to notice if different from page URL, else empty",
+        }
+    ]
+}
 
 
 async def scrape_crawl4ai() -> list[dict]:
     """
     Crawl4AI — 100% free, self-hosted, no API key.
     Handles JS rendering, anti-bot (3-tier), Shadow DOM.
-    Targets JS-heavy portals that raw httpx cannot scrape.
-    Gracefully skips if crawl4ai is not installed.
+    Uses LLMExtractionStrategy (GPT-4o-mini) for structured extraction when available;
+    falls back to markdown block parsing if OPENAI_API_KEY is absent or strategy fails.
     """
     try:
         from crawl4ai import AsyncWebCrawler, CacheMode
@@ -768,39 +915,92 @@ async def scrape_crawl4ai() -> list[dict]:
         logger.warning("[crawl4ai] not installed — run: pip install crawl4ai && python3 -m playwright install chromium")
         return []
 
+    openai_key = os.getenv("OPENAI_API_KEY", "")
+    use_llm = bool(openai_key)
+
+    if use_llm:
+        try:
+            from crawl4ai.extraction_strategy import LLMExtractionStrategy
+        except ImportError:
+            logger.warning("[crawl4ai] LLMExtractionStrategy not available — markdown fallback")
+            use_llm = False
+
     results = []
 
     try:
         async with AsyncWebCrawler(headless=True, verbose=False) as crawler:
             for target in CRAWL4AI_TARGETS:
                 try:
-                    result = await crawler.arun(
+                    run_kwargs: dict = dict(
                         url=target["url"],
                         cache_mode=CacheMode.BYPASS,
-                        word_count_threshold=8,
                         excluded_tags=["nav", "footer", "header", "script", "style"],
                         remove_overlay_elements=True,
                         wait_until="networkidle",
                     )
 
+                    if use_llm:
+                        run_kwargs["extraction_strategy"] = LLMExtractionStrategy(
+                            provider="openai/gpt-4o-mini",
+                            api_token=openai_key,
+                            schema=_LLM_SCHEMA,
+                            instruction=(
+                                "Extract all ERP, finance-system, or procurement tenders "
+                                "listed on this page into the tenders array. "
+                                "Focus on UK public sector ERP procurement opportunities."
+                            ),
+                        )
+
+                    result = await crawler.arun(**run_kwargs)
+
                     if not result.success:
                         logger.warning(f"[crawl4ai] {target['name']}: {result.error_message}")
                         continue
 
-                    markdown = result.markdown or ""
-                    # Split into blocks and filter ERP-relevant ones
-                    blocks = [b.strip() for b in markdown.split("\n\n") if len(b.strip()) > 40]
+                    # --- LLM structured extraction path ---
+                    if use_llm and result.extracted_content:
+                        try:
+                            extracted = json.loads(result.extracted_content)
+                            tenders = extracted.get("tenders") or (
+                                extracted if isinstance(extracted, list) else []
+                            )
+                            for t in tenders:
+                                title = t.get("title", "")
+                                org = t.get("organisation", "")
+                                if not title:
+                                    continue
+                                combined = title + " " + org
+                                if _erp_score(combined) == 0:
+                                    continue
+                                results.append({
+                                    "source": f"Crawl4AI — {target['name']}",
+                                    "title": title,
+                                    "org": org,
+                                    "url": t.get("url") or target["url"],
+                                    "summary": f"Deadline: {t.get('deadline','TBC')} | Value: {t.get('value','TBC')}",
+                                    "sector": target["sector"],
+                                    "keywords": _extract_keywords(combined),
+                                    "published": "",
+                                    "detected_at": NOW(),
+                                    "value": t.get("value", ""),
+                                    "deadline": t.get("deadline", ""),
+                                })
+                            logger.debug(f"[crawl4ai:{target['name']}] LLM extracted {len(tenders)} tenders")
+                            continue  # skip markdown fallback for this target
+                        except Exception as e:
+                            logger.warning(f"[crawl4ai:{target['name']}] LLM parse failed ({e}), markdown fallback")
 
-                    seen_block_keys = set()
+                    # --- Markdown fallback path ---
+                    markdown = result.markdown or ""
+                    blocks = [b.strip() for b in markdown.split("\n\n") if len(b.strip()) > 40]
+                    seen_block_keys: set[str] = set()
                     for block in blocks:
                         if _erp_score(block) == 0:
                             continue
-                        # Dedup similar blocks
                         block_key = block[:60]
                         if block_key in seen_block_keys:
                             continue
                         seen_block_keys.add(block_key)
-
                         title = block[:120].replace("\n", " ").strip()
                         results.append({
                             "source": f"Crawl4AI — {target['name']}",

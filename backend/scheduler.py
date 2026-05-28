@@ -9,6 +9,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from scrapers import run_all_scrapers
 from scorer import score_signals
+from enricher import enrich_signals
 from db import insert_signal, insert_scan_run, finish_scan_run
 
 logger = logging.getLogger(__name__)
@@ -35,8 +36,11 @@ async def run_scan():
         scored = await score_signals(signals)
         logger.info(f"[scheduler] Scored {len(scored)} signals")
 
+        enriched = await enrich_signals(scored)
+        logger.info(f"[scheduler] Buyer enrichment complete")
+
         saved = 0
-        for s in scored:
+        for s in enriched:
             if s.get("score", 0) >= 4:  # Only save relevant signals
                 await insert_signal(s)
                 saved += 1

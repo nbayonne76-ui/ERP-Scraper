@@ -33,7 +33,10 @@ async def init_db():
                 keywords    TEXT,
                 published   TEXT,
                 detected_at TEXT    NOT NULL,
-                converted   INTEGER DEFAULT 0
+                converted   INTEGER DEFAULT 0,
+                value       TEXT,
+                deadline    TEXT,
+                buyer_intel TEXT
             )
         """)
         await db.execute("""
@@ -49,8 +52,11 @@ async def init_db():
 
         # Migrations for existing DBs
         for col, definition in [
-            ("dedup_hash", "TEXT NOT NULL DEFAULT ''"),
-            ("erp_stage",  "TEXT DEFAULT 'unknown'"),
+            ("dedup_hash",  "TEXT NOT NULL DEFAULT ''"),
+            ("erp_stage",   "TEXT DEFAULT 'unknown'"),
+            ("value",       "TEXT"),
+            ("deadline",    "TEXT"),
+            ("buyer_intel", "TEXT"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE signals ADD COLUMN {col} {definition}")
@@ -90,11 +96,13 @@ async def insert_signal(signal: dict) -> int | None:
     dedup = _url_hash(signal.get("url", ""), signal.get("title", ""))
     async with aiosqlite.connect(DB_PATH) as db:
         try:
+            buyer_intel = signal.get("buyer_intel")
             cursor = await db.execute("""
                 INSERT INTO signals
                 (dedup_hash, source, title, org, url, summary, sector, erp_stage, score,
-                 score_reason, keywords, published, detected_at, converted)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                 score_reason, keywords, published, detected_at, converted,
+                 value, deadline, buyer_intel)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
             """, (
                 dedup,
                 signal.get("source"),
@@ -109,6 +117,9 @@ async def insert_signal(signal: dict) -> int | None:
                 json.dumps(signal.get("keywords", [])),
                 signal.get("published"),
                 signal.get("detected_at"),
+                signal.get("value"),
+                signal.get("deadline"),
+                json.dumps(buyer_intel) if buyer_intel else None,
             ))
             await db.commit()
             return cursor.lastrowid
@@ -146,6 +157,8 @@ async def get_signals(
         for row in rows:
             d = dict(row)
             d["keywords"] = json.loads(d.get("keywords") or "[]")
+            raw_intel = d.get("buyer_intel")
+            d["buyer_intel"] = json.loads(raw_intel) if raw_intel else None
             result.append(d)
         return result
 
