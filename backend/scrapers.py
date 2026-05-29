@@ -52,6 +52,23 @@ def _erp_score(text: str) -> int:
     return 0
 
 
+
+def _is_recent(published: str) -> bool:
+    """Return False if published date is parseable and clearly before 2026-01-01."""
+    if not published:
+        return True  # no date = keep
+    s = str(published).strip()
+    if not s:
+        return True
+    # Quick check: if '2025', '2024', '2023' etc appear without '2026' or later
+    import re as _re
+    year_match = _re.search(r'20(\d\d)', s)
+    if year_match:
+        year = int('20' + year_match.group(1))
+        if year < 2026:
+            return False
+    return True
+
 def _extract_keywords(text: str) -> list[str]:
     t = text.lower()
     found = [kw for kw in ERP_KEYWORDS if kw in t]
@@ -233,6 +250,8 @@ async def scrape_google_news() -> list[dict]:
                     combined = title + " " + summary
                     if _erp_score(combined) == 0:
                         continue
+                    if not _is_recent(published):
+                        continue
 
                     results.append({
                         "source": feed_name,
@@ -348,6 +367,8 @@ async def scrape_job_postings() -> list[dict]:
 
                     combined = title + " " + summary
                     if not any(kw in combined.lower() for kw in JOB_INTENT_KEYWORDS):
+                        continue
+                    if not _is_recent(published):
                         continue
 
                     results.append({
@@ -986,6 +1007,8 @@ async def scrape_tavily() -> list[dict]:
                     content = item.get("content", "")[:500]
                     combined = title + " " + content
                     if _erp_score(combined) == 0:
+                        continue
+                    if not _is_recent(item.get("published_date", "")):
                         continue
                     results.append({
                         "source": "Tavily Search",
@@ -1670,6 +1693,8 @@ async def scrape_exa() -> list[dict]:
                     published = (item.get("publishedDate") or "")[:10]
                     combined = title + " " + text
                     if _erp_score(combined) == 0:
+                        continue
+                    if not _is_recent(item.get("publishedDate", "")):
                         continue
                     results.append({
                         "source": "Exa Neural Search",

@@ -142,11 +142,16 @@ async def get_signals(
     min_score: int = 0,
     converted: int | None = None,
     sector: str | None = None,
+    min_published: str = "2026-01-01",
 ) -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        query = "SELECT * FROM signals WHERE score >= ?"
-        params: list = [min_score]
+        query = (
+            "SELECT * FROM signals WHERE score >= ? "
+            "AND (published >= ? OR published IS NULL OR published = ''  "
+            "     OR detected_at >= ?)"
+        )
+        params: list = [min_score, min_published, min_published]
         if converted is not None:
             query += " AND converted = ?"
             params.append(converted)
