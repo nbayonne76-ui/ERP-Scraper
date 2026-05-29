@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { useLocalStorage } from "./useLocalStorage";
 
 const API_BASE = "http://localhost:8002";
@@ -1186,7 +1186,7 @@ function TabAccounts() {
   }, []);
 
   // Group signals by org, aggregate intel
-  const accounts = React.useMemo(() => {
+  const accounts = useMemo(() => {
     const map = {};
     for (const s of signals) {
       const org = (s.org || "").trim() || s.source || "Unknown";
