@@ -63,7 +63,7 @@ app = FastAPI(title="UK ERP Tender Intelligence API", version="2.0", lifespan=li
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

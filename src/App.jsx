@@ -7,7 +7,7 @@ import {
   SECTORS, STATUSES, CPV_CODES, STRATEGY_CARDS,
 } from "./data";
 
-const API_BASE = "http://" + (window.location.hostname === "localhost" ? "localhost" : window.location.hostname) + ":8002";
+const API_BASE = "http://localhost:8002";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -1166,14 +1166,14 @@ function TabAccounts() {
   useEffect(() => {
     fetch(API_BASE + "/api/signals?limit=500&min_score=5")
       .then((r) => r.json())
-      .then((d) => { setSignals(Array.isArray(d) ? d : []); setLoading(false); })
+      .then((d) => { setSignals(Array.isArray(d) ? d : (d.signals || [])); setLoading(false); })
       .catch(() => setLoading(false));
   }, []);
 
   const accounts = useMemo(() => {
     const map = {};
     for (const s of signals) {
-      const org = (s.org || "").trim();
+      const org = (s.org || "").trim() || s.source || "";
       if (!org || org.length < 3) continue;
       if (!map[org]) map[org] = { org, signals: [], maxScore: 0, contacts: [], buyer_intel: null };
       map[org].signals.push(s);
