@@ -1155,7 +1155,6 @@ function TabSignals({ onConvertSignal }) {
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
-export default 
 function TabAccounts() {
   const [signals, setSignals] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -1278,7 +1277,7 @@ function TabAccounts() {
   );
 }
 
-function App() {
+export default function App() {
   const [tenders, setTenders] = useLocalStorage("erp_tenders", LIVE_TENDERS_INITIAL);
   const [tracking, setTracking] = useLocalStorage("erp_tracking", {});
   const [frameworkStatus, setFrameworkStatus] = useLocalStorage("erp_frameworks", {});
