@@ -897,9 +897,7 @@ function EmailDraftModal({ signal, contactIdx, onClose }) {
               </button>
               {contact?.email_pattern && (
                 <a
-                  href={`mailto:${contact.email_pattern}?subject=ERP%20Procurement%20Discussion&body=${encodeURIComponent(email.split("
-").slice(2).join("
-"))}`}
+                  href={"mailto:" + contact.email_pattern + "?subject=ERP%20Procurement%20Discussion"}
                   style={{ flex: 1, background: "rgba(14,165,233,0.12)", border: "1px solid #0ea5e9", color: "#7dd3fc", padding: "9px 0", borderRadius: 8, textDecoration: "none", fontSize: 13, fontWeight: 600, textAlign: "center" }}
                 >
                   📧 Open in Mail
