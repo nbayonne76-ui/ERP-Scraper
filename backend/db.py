@@ -36,7 +36,8 @@ async def init_db():
                 converted   INTEGER DEFAULT 0,
                 value       TEXT,
                 deadline    TEXT,
-                buyer_intel TEXT
+                buyer_intel TEXT,
+                contacts    TEXT
             )
         """)
         await db.execute("""
@@ -57,6 +58,7 @@ async def init_db():
             ("value",       "TEXT"),
             ("deadline",    "TEXT"),
             ("buyer_intel", "TEXT"),
+            ("contacts",    "TEXT"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE signals ADD COLUMN {col} {definition}")
@@ -97,12 +99,13 @@ async def insert_signal(signal: dict) -> int | None:
     async with aiosqlite.connect(DB_PATH) as db:
         try:
             buyer_intel = signal.get("buyer_intel")
+            contacts = signal.get("contacts")
             cursor = await db.execute("""
                 INSERT INTO signals
                 (dedup_hash, source, title, org, url, summary, sector, erp_stage, score,
                  score_reason, keywords, published, detected_at, converted,
-                 value, deadline, buyer_intel)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                 value, deadline, buyer_intel, contacts)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
             """, (
                 dedup,
                 signal.get("source"),
@@ -120,6 +123,7 @@ async def insert_signal(signal: dict) -> int | None:
                 signal.get("value"),
                 signal.get("deadline"),
                 json.dumps(buyer_intel) if buyer_intel else None,
+                json.dumps(contacts) if contacts else None,
             ))
             await db.commit()
             return cursor.lastrowid
@@ -159,6 +163,8 @@ async def get_signals(
             d["keywords"] = json.loads(d.get("keywords") or "[]")
             raw_intel = d.get("buyer_intel")
             d["buyer_intel"] = json.loads(raw_intel) if raw_intel else None
+            raw_contacts = d.get("contacts")
+            d["contacts"] = json.loads(raw_contacts) if raw_contacts else []
             result.append(d)
         return result
 

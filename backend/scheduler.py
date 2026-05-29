@@ -10,6 +10,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from scrapers import run_all_scrapers
 from scorer import score_signals
 from enricher import enrich_signals
+from contact_finder import find_contacts_for_signals
 from db import insert_signal, insert_scan_run, finish_scan_run
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,9 @@ async def run_scan():
 
         enriched = await enrich_signals(scored)
         logger.info(f"[scheduler] Buyer enrichment complete")
+
+        enriched = await find_contacts_for_signals(enriched)
+        logger.info(f"[scheduler] Contact intelligence complete")
 
         saved = 0
         for s in enriched:

@@ -342,6 +342,7 @@ function TabTenders({ tenders, tracking, onOpen, onAdd, onExport, onTrackSignal 
       erp_stage: s.erp_stage,
       source: s.source,
       buyer_intel: s.buyer_intel || null,
+      contacts: s.contacts || [],
     }));
 
   const allItems = [
@@ -459,6 +460,28 @@ function TabTenders({ tenders, tracking, onOpen, onAdd, onExport, onTrackSignal 
                       {t.buyer_intel.notes && (
                         <span style={{ color: "#7c3aed" }}> — {t.buyer_intel.notes}</span>
                       )}
+                    </div>
+                  )}
+                  {t.contacts?.length > 0 && (
+                    <div style={{ marginTop: 8, borderTop: "1px solid #1e293b", paddingTop: 8 }}>
+                      <div style={{ fontSize: 10, color: "#475569", fontWeight: 700, letterSpacing: "0.08em", marginBottom: 6 }}>DECISION MAKERS</div>
+                      {t.contacts.map((c, i) => (
+                        <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
+                          <div style={{ width: 26, height: 26, borderRadius: "50%", background: "rgba(99,102,241,0.2)", color: "#a5b4fc", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 700, flexShrink: 0 }}>
+                            {c.name.split(" ").map(p => p[0]).join("").slice(0,2).toUpperCase()}
+                          </div>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <span style={{ color: "#e2e8f0", fontSize: 12, fontWeight: 600 }}>{c.name}</span>
+                            <span style={{ color: "#64748b", fontSize: 11 }}> — {c.title}</span>
+                          </div>
+                          {c.linkedin_url && (
+                            <a href={c.linkedin_url} target="_blank" rel="noopener noreferrer" style={{ background: "#0077b5", color: "white", padding: "2px 8px", borderRadius: 4, fontSize: 10, textDecoration: "none", fontWeight: 700 }}>in</a>
+                          )}
+                          {c.email_pattern && (
+                            <button onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(c.email_pattern); alert("Copied: " + c.email_pattern); }} title={c.email_pattern} style={{ background: "transparent", border: "1px solid #334155", color: "#64748b", padding: "2px 8px", borderRadius: 4, fontSize: 10, cursor: "pointer" }}>✉</button>
+                          )}
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
@@ -854,6 +877,33 @@ function SignalCard({ signal, onConvert }) {
               {signal.buyer_intel.notes && (
                 <span style={{ color: "#7c3aed" }}> — {signal.buyer_intel.notes}</span>
               )}
+            </div>
+          )}
+
+          {signal.contacts?.length > 0 && (
+            <div style={{ marginTop: 8, borderTop: "1px solid #1e293b", paddingTop: 8 }}>
+              <div style={{ fontSize: 10, color: "#475569", fontWeight: 700, letterSpacing: "0.08em", marginBottom: 6 }}>DECISION MAKERS</div>
+              {signal.contacts.map((c, i) => (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
+                  <div style={{ width: 26, height: 26, borderRadius: "50%", background: "rgba(99,102,241,0.2)", color: "#a5b4fc", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 700, flexShrink: 0 }}>
+                    {c.name.split(" ").map(p => p[0]).join("").slice(0,2).toUpperCase()}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <span style={{ color: "#e2e8f0", fontSize: 12, fontWeight: 600 }}>{c.name}</span>
+                    <span style={{ color: "#64748b", fontSize: 11 }}> — {c.title}</span>
+                  </div>
+                  {c.linkedin_url && (
+                    <a href={c.linkedin_url} target="_blank" rel="noopener noreferrer" style={{ background: "#0077b5", color: "white", padding: "2px 8px", borderRadius: 4, fontSize: 10, textDecoration: "none", fontWeight: 700 }}>in</a>
+                  )}
+                  {c.email_pattern && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); navigator.clipboard.writeText(c.email_pattern); alert("Copied: " + c.email_pattern); }}
+                      title={c.email_pattern}
+                      style={{ background: "transparent", border: "1px solid #334155", color: "#64748b", padding: "2px 8px", borderRadius: 4, fontSize: 10, cursor: "pointer" }}
+                    >✉</button>
+                  )}
+                </div>
+              ))}
             </div>
           )}
           {signal.keywords?.length > 0 && (
