@@ -120,6 +120,68 @@ async def convert_signal(signal_id: int):
     return {"message": "Marked as converted"}
 
 
+
+
+@app.post("/api/email/draft")
+async def draft_email(body: dict):
+    """Generate a personalised outreach email for a signal + contact."""
+    from openai import AsyncOpenAI
+
+    signal_id = body.get("signal_id")
+    contact_idx = int(body.get("contact_idx", 0))
+
+    signals = await get_signals(limit=2000)
+    signal = next((s for s in signals if s["id"] == signal_id), None)
+    if not signal:
+        raise HTTPException(status_code=404, detail="Signal not found")
+
+    openai_key = os.getenv("OPENAI_API_KEY", "")
+    if not openai_key:
+        raise HTTPException(status_code=503, detail="No OPENAI_API_KEY configured")
+
+    contacts = signal.get("contacts") or []
+    contact = contacts[contact_idx] if contact_idx < len(contacts) else None
+    buyer_intel = signal.get("buyer_intel") or {}
+
+    contact_name = contact.get("name", "[Name]") if contact else "[Name]"
+    contact_title = contact.get("title", "") if contact else ""
+    org = signal.get("org", "")
+    current_erp = buyer_intel.get("current_erp", "Unknown")
+    expiry = buyer_intel.get("contract_expiry", "")
+    notes = buyer_intel.get("notes", "") or signal.get("score_reason", "")
+
+    prompt = f"""Write a concise professional cold outreach email for an ERP sales representative.
+
+Context:
+- Organisation: {org}
+- Contact: {contact_name}{f" ({contact_title})" if contact_title else ""}
+- Their current ERP: {current_erp}
+- Contract situation: {expiry if expiry and expiry != "Unknown" else "not confirmed"} 
+- Intelligence: {notes}
+
+Requirements:
+- Start with: Subject: [subject line]
+- Then a blank line, then the email body
+- Maximum 150 words total
+- Reference their specific ERP situation naturally
+- Consultative tone — offer value, not product push
+- End with a low-pressure CTA (15-min call or reply)
+- Sign off as: [Your Name] | [Your Company]
+- Do NOT mention how you obtained this information"""
+
+    try:
+        client = AsyncOpenAI(api_key=openai_key)
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            max_tokens=400,
+            temperature=0.7,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        email_text = response.choices[0].message.content.strip()
+        return {"email": email_text, "contact": contact, "org": org}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", "8001"))

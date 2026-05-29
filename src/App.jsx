@@ -840,7 +840,80 @@ function BackendStatusWidget({ status, onTriggerScan, loading }) {
   );
 }
 
-function SignalCard({ signal, onConvert }) {
+
+function EmailDraftModal({ signal, contactIdx, onClose }) {
+  const contact = (signal.contacts || [])[contactIdx];
+  const [email, setEmail] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/email/draft`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ signal_id: signal.id, contact_idx: contactIdx }),
+    })
+      .then((r) => r.json())
+      .then((d) => { setEmail(d.email || "Could not generate email."); setLoading(false); })
+      .catch(() => { setEmail("Error generating email."); setLoading(false); });
+  }, []);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(email);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <Overlay onClose={onClose}>
+      <div style={{ padding: 24 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "#f1f5f9" }}>✉ Draft Outreach Email</div>
+            <div style={{ fontSize: 12, color: "#64748b", marginTop: 3 }}>
+              {signal.org}{contact ? ` → ${contact.name} (${contact.title})` : ""}
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background: "transparent", border: "none", color: "#64748b", cursor: "pointer", fontSize: 18 }}>✕</button>
+        </div>
+        {loading ? (
+          <div style={{ textAlign: "center", padding: "40px 0", color: "#475569" }}>
+            <div style={{ fontSize: 24, marginBottom: 10 }}>⏳</div>
+            <div>Generating personalised email…</div>
+          </div>
+        ) : (
+          <>
+            <textarea
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              style={{ width: "100%", minHeight: 280, background: "#0a0f1e", color: "#e2e8f0", border: "1px solid #334155", borderRadius: 8, padding: "12px 14px", fontSize: 12, fontFamily: "monospace", lineHeight: 1.7, resize: "vertical", boxSizing: "border-box" }}
+            />
+            <div style={{ display: "flex", gap: 9, marginTop: 14 }}>
+              <button
+                onClick={handleCopy}
+                style={{ flex: 1, background: copied ? "rgba(22,163,74,0.2)" : "rgba(99,102,241,0.15)", border: `1px solid ${copied ? "#16a34a" : "#4338ca"}`, color: copied ? "#4ade80" : "#a5b4fc", padding: "9px 0", borderRadius: 8, cursor: "pointer", fontSize: 13, fontWeight: 600 }}
+              >
+                {copied ? "✓ Copied!" : "📋 Copy to Clipboard"}
+              </button>
+              {contact?.email_pattern && (
+                <a
+                  href={`mailto:${contact.email_pattern}?subject=ERP%20Procurement%20Discussion&body=${encodeURIComponent(email.split("
+").slice(2).join("
+"))}`}
+                  style={{ flex: 1, background: "rgba(14,165,233,0.12)", border: "1px solid #0ea5e9", color: "#7dd3fc", padding: "9px 0", borderRadius: 8, textDecoration: "none", fontSize: 13, fontWeight: 600, textAlign: "center" }}
+                >
+                  📧 Open in Mail
+                </a>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    </Overlay>
+  );
+}
+
+function SignalCard({ signal, onConvert, onDraftEmail }) {
   const sc = SCORE_COLOR(signal.score);
   const secColor = SECTOR_COLORS[signal.sector] || "#6366f1";
   const stage = ERP_STAGE_LABEL[signal.erp_stage] || ERP_STAGE_LABEL["unknown"];
@@ -904,6 +977,14 @@ function SignalCard({ signal, onConvert }) {
                   )}
                 </div>
               ))}
+              {signal.contacts?.length > 0 && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); onDraftEmail && onDraftEmail(signal, 0); }}
+                  style={{ marginTop: 8, width: "100%", background: "rgba(14,165,233,0.08)", border: "1px solid rgba(14,165,233,0.3)", color: "#7dd3fc", padding: "6px 0", borderRadius: 6, cursor: "pointer", fontSize: 11, fontWeight: 600 }}
+                >
+                  ✉ Draft Outreach Email
+                </button>
+              )}
             </div>
           )}
           {signal.keywords?.length > 0 && (
@@ -948,6 +1029,7 @@ function TabSignals({ onConvertSignal }) {
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [minScore, setMinScore] = useState(5);
+  const [emailDraft, setEmailDraft] = useState(null);
   const [filterSource, setFilterSource] = useState("All");
   const [filterSector, setFilterSector] = useState("All");
 
@@ -1012,6 +1094,7 @@ function TabSignals({ onConvertSignal }) {
 
   return (
     <div>
+      {emailDraft && <EmailDraftModal signal={emailDraft.signal} contactIdx={emailDraft.contactIdx} onClose={() => setEmailDraft(null)} />}
       <BackendStatusWidget status={status} onTriggerScan={triggerScan} loading={loading} />
 
       {/* Stats */}
@@ -1065,7 +1148,7 @@ function TabSignals({ onConvertSignal }) {
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {filtered.map((signal) => (
-            <SignalCard key={signal.id} signal={signal} onConvert={handleConvert} />
+            <SignalCard key={signal.id} signal={signal} onConvert={handleConvert} onDraftEmail={(s, idx) => setEmailDraft({ signal: s, contactIdx: idx })} />
           ))}
           {filtered.length === 0 && signals.length === 0 && (
             <div style={{ textAlign: "center", color: "#475569", padding: 48, fontSize: 14 }}>
@@ -1089,12 +1172,185 @@ function TabSignals({ onConvertSignal }) {
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
-export default function App() {
+export default 
+function TabAccounts() {
+  const [signals, setSignals] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [expanded, setExpanded] = useState(null);
+  const [emailDraft, setEmailDraft] = useState(null);
+  const [search, setSearch] = useState("");
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/signals?limit=500&min_score=5`)
+      .then((r) => r.json())
+      .then((d) => { setSignals(Array.isArray(d) ? d : []); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, []);
+
+  // Group signals by org, aggregate intel
+  const accounts = React.useMemo(() => {
+    const map = {};
+    for (const s of signals) {
+      const org = (s.org || "").trim() || s.source || "Unknown";
+      if (org === "Unknown" || org.length < 3) continue;
+      if (!map[org]) map[org] = { org, signals: [], maxScore: 0, contacts: [], buyer_intel: null, sources: new Set() };
+      map[org].signals.push(s);
+      map[org].sources.add(s.source);
+      if (s.score > map[org].maxScore) {
+        map[org].maxScore = s.score;
+        if (s.buyer_intel) map[org].buyer_intel = s.buyer_intel;
+      }
+      for (const c of (s.contacts || [])) {
+        if (!map[org].contacts.find((ec) => ec.name === c.name)) map[org].contacts.push(c);
+      }
+    }
+    return Object.values(map)
+      .filter((a) => a.signals.length >= 1)
+      .sort((a, b) => b.maxScore - a.maxScore || b.signals.length - a.signals.length);
+  }, [signals]);
+
+  const filtered = accounts.filter((a) =>
+    !search || a.org.toLowerCase().includes(search.toLowerCase())
+  );
+
+  const sc = SCORE_COLOR;
+
+  if (loading) return <div style={{ textAlign: "center", padding: 60, color: "#475569" }}>Loading account intelligence…</div>;
+
+  return (
+    <div>
+      {emailDraft && <EmailDraftModal signal={emailDraft.signal} contactIdx={emailDraft.contactIdx} onClose={() => setEmailDraft(null)} />}
+
+      {/* Header */}
+      <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 18, flexWrap: "wrap" }}>
+        <div>
+          <div style={{ fontSize: 18, fontWeight: 700, color: "#f1f5f9" }}>Account Intelligence</div>
+          <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>{filtered.length} organisations with ERP procurement signals</div>
+        </div>
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search organisation…"
+          style={{ marginLeft: "auto", background: "#1e293b", border: "1px solid #334155", borderRadius: 8, padding: "8px 13px", color: "#e2e8f0", fontSize: 13, outline: "none", width: 240 }}
+        />
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {filtered.map((acc) => {
+          const scoreC = sc(acc.maxScore);
+          const intel = acc.buyer_intel || {};
+          const isExpanded = expanded === acc.org;
+          const topSignal = acc.signals[0];
+
+          return (
+            <div key={acc.org} style={{ background: "#111827", border: "1px solid #1e293b", borderLeft: `3px solid ${scoreC.color}`, borderRadius: 10, overflow: "hidden" }}>
+              {/* Account header row */}
+              <div style={{ padding: "14px 18px", cursor: "pointer" }} onClick={() => setExpanded(isExpanded ? null : acc.org)}>
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+                  <div style={{ flex: 1, minWidth: 200 }}>
+                    <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap", marginBottom: 5 }}>
+                      <span style={{ background: scoreC.bg, color: scoreC.color, borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 700 }}>
+                        {scoreC.label} {acc.maxScore}/10
+                      </span>
+                      <span style={{ background: "rgba(71,85,105,0.2)", color: "#94a3b8", borderRadius: 20, padding: "2px 9px", fontSize: 10 }}>
+                        {acc.signals.length} signal{acc.signals.length > 1 ? "s" : ""}
+                      </span>
+                      {acc.contacts.length > 0 && (
+                        <span style={{ background: "rgba(14,165,233,0.1)", color: "#7dd3fc", borderRadius: 20, padding: "2px 9px", fontSize: 10 }}>
+                          👤 {acc.contacts.length} contact{acc.contacts.length > 1 ? "s" : ""}
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ fontWeight: 700, fontSize: 15, color: "#f1f5f9", marginBottom: 3 }}>{acc.org}</div>
+                    {intel.current_erp && intel.current_erp !== "Unknown" && (
+                      <div style={{ fontSize: 12 }}>
+                        <span style={{ color: "#a855f7", fontWeight: 600 }}>🔍 {intel.current_erp}</span>
+                        {intel.contract_expiry && intel.contract_expiry !== "Unknown" && (
+                          <span style={{ color: "#f59e0b", fontWeight: 600 }}> | expires {intel.contract_expiry}</span>
+                        )}
+                      </div>
+                    )}
+                    {intel.notes && <div style={{ fontSize: 11, color: "#475569", fontStyle: "italic", marginTop: 2 }}>{intel.notes}</div>}
+                  </div>
+
+                  {/* Contacts */}
+                  {acc.contacts.length > 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 5, minWidth: 200 }}>
+                      {acc.contacts.slice(0, 2).map((c, i) => (
+                        <div key={i} style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                          <div style={{ width: 26, height: 26, borderRadius: "50%", background: "rgba(99,102,241,0.2)", color: "#a5b4fc", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 9, fontWeight: 700 }}>
+                            {c.name.split(" ").map((p) => p[0]).join("").slice(0, 2).toUpperCase()}
+                          </div>
+                          <div style={{ flex: 1 }}>
+                            <span style={{ color: "#e2e8f0", fontSize: 12, fontWeight: 600 }}>{c.name}</span>
+                            <span style={{ color: "#64748b", fontSize: 11 }}> — {c.title}</span>
+                          </div>
+                          {c.linkedin_url && (
+                            <a href={c.linkedin_url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} style={{ background: "#0077b5", color: "white", padding: "2px 7px", borderRadius: 4, fontSize: 10, textDecoration: "none", fontWeight: 700 }}>in</a>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Action buttons */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
+                    {acc.contacts.length > 0 && (
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setEmailDraft({ signal: topSignal, contactIdx: 0 }); }}
+                        style={{ background: "rgba(14,165,233,0.12)", border: "1px solid rgba(14,165,233,0.4)", color: "#7dd3fc", padding: "7px 14px", borderRadius: 7, cursor: "pointer", fontSize: 12, fontWeight: 700, whiteSpace: "nowrap" }}
+                      >
+                        ✉ Start Outreach
+                      </button>
+                    )}
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setExpanded(isExpanded ? null : acc.org); }}
+                      style={{ background: "transparent", border: "1px solid #334155", color: "#475569", padding: "6px 14px", borderRadius: 7, cursor: "pointer", fontSize: 11 }}
+                    >
+                      {isExpanded ? "▲ Collapse" : `▼ ${acc.signals.length} signals`}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Expanded signals */}
+              {isExpanded && (
+                <div style={{ borderTop: "1px solid #1e293b", padding: "12px 18px", background: "#0a0f1e" }}>
+                  <div style={{ fontSize: 10, color: "#475569", fontWeight: 700, letterSpacing: "0.08em", marginBottom: 10 }}>ALL SIGNALS</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                    {acc.signals.map((s, i) => {
+                      const sScore = sc(s.score);
+                      const stage = ERP_STAGE_LABEL[s.erp_stage] || ERP_STAGE_LABEL["unknown"];
+                      return (
+                        <div key={i} style={{ background: "#111827", border: "1px solid #1e293b", borderRadius: 8, padding: "10px 13px", display: "flex", gap: 10, alignItems: "flex-start" }}>
+                          <span style={{ background: sScore.bg, color: sScore.color, borderRadius: 20, padding: "2px 9px", fontSize: 10, fontWeight: 700, flexShrink: 0 }}>{s.score}/10</span>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 2 }}>{s.title}</div>
+                            <div style={{ fontSize: 10, color: "#475569" }}>{s.source} · {s.published || s.detected_at?.slice(0,10)}</div>
+                          </div>
+                          {stage.label && <span style={{ background: stage.bg, color: stage.color, borderRadius: 20, padding: "2px 8px", fontSize: 9, fontWeight: 600, flexShrink: 0 }}>{stage.label}</span>}
+                          {s.url && <a href={s.url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()} style={{ color: "#6366f1", fontSize: 11, textDecoration: "none", flexShrink: 0 }}>→</a>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function App() {
   const [tenders, setTenders] = useLocalStorage("erp_tenders", LIVE_TENDERS_INITIAL);
   const [tracking, setTracking] = useLocalStorage("erp_tracking", {});
   const [frameworkStatus, setFrameworkStatus] = useLocalStorage("erp_frameworks", {});
 
   const [activeTab, setActiveTab] = useState("tenders");
+  const [scanRunning, setScanRunning] = useState(false);
   const [detailTender, setDetailTender] = useState(null);
   const [editTender, setEditTender] = useState(null); // null=closed | {}=new | tender=edit
   const [copied, setCopied] = useState(null);
@@ -1168,6 +1424,7 @@ export default function App() {
   };
 
   const TABS = [
+    { id: "accounts", label: "🏢 Accounts" },
     { id: "signals", label: "🤖 AI Signals" },
     { id: "tenders", label: "📋 Tenders" },
     { id: "pipeline", label: "🎯 Pipeline" },
@@ -1176,6 +1433,16 @@ export default function App() {
     { id: "frameworks", label: "📋 Frameworks" },
     { id: "strategy", label: "🗺️ Strategy" },
   ];
+
+
+  const triggerScanGlobal = async () => {
+    if (scanRunning) return;
+    setScanRunning(true);
+    try {
+      await fetch(`${API_BASE}/api/scan`, { method: "POST" });
+    } catch {}
+    setTimeout(() => setScanRunning(false), 60000);
+  };
 
   return (
     <div style={{ minHeight: "100vh", background: "#0a0f1e", fontFamily: "'Georgia', 'Times New Roman', serif", color: "#e2e8f0" }}>
@@ -1206,6 +1473,13 @@ export default function App() {
                 </div>
               ))}
             </div>
+            <button
+              onClick={triggerScanGlobal}
+              disabled={scanRunning}
+              style={{ alignSelf: "flex-start", background: scanRunning ? "rgba(245,158,11,0.1)" : "rgba(99,102,241,0.15)", border: `1px solid ${scanRunning ? "#f59e0b" : "#4338ca"}`, color: scanRunning ? "#f59e0b" : "#a5b4fc", padding: "9px 18px", borderRadius: 9, cursor: scanRunning ? "default" : "pointer", fontSize: 13, fontWeight: 700, whiteSpace: "nowrap" }}
+            >
+              {scanRunning ? "⏳ Scanning…" : "▶ Scan Now"}
+            </button>
           </div>
           <div style={{ display: "flex", gap: 2, marginTop: 20, flexWrap: "wrap" }}>
             {TABS.map((tab) => (
@@ -1219,6 +1493,7 @@ export default function App() {
 
       {/* CONTENT */}
       <div style={{ maxWidth: 1200, margin: "0 auto", padding: "22px 32px" }}>
+        {activeTab === "accounts" && <TabAccounts />}
         {activeTab === "signals" && (
           <TabSignals onConvertSignal={convertSignalToTender} />
         )}
