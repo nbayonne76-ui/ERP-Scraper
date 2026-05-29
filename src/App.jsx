@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { useLocalStorage } from "./useLocalStorage";
 
-const API_BASE = "http://localhost:8002";
+const API_BASE = "http://" + (window.location.hostname === "localhost" ? "localhost" : window.location.hostname) + ":8002";
 import {
   SOURCES, LIVE_TENDERS_INITIAL, SEARCH_QUERIES, FRAMEWORKS,
   STATUS_COLORS, SECTOR_COLORS, PIPELINE_STAGES,
